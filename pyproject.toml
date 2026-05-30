@@ -1,0 +1,32 @@
+[project]
+name = "autoshorts"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "av>=17.0.0",
+    "pydantic>=2.13.2",
+    "python-dotenv>=1.2.2",
+    "pyyaml>=6.0.3",
+    "typer>=0.24.1",
+    "yt-dlp>=2026.3.17",
+]
+
+[project.optional-dependencies]
+# Optional: enables OpenAI-backed transcription (Whisper) and LLM edit planning.
+# Install with `uv sync --extra openai`. The prototype runs fully without it via
+# provided transcripts and the deterministic planner.
+openai = [
+    "openai>=1.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
+
+[tool.pytest.ini_options]
+# The package lives at the repo root (no build step), so put the root on the
+# import path for tests rather than requiring an editable install.
+pythonpath = ["."]
+testpaths = ["tests"]
+

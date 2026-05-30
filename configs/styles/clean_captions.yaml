@@ -1,0 +1,20 @@
+name: clean_captions
+export:
+  aspect_ratio: "9:16"
+  width: 1080
+  height: 1920
+  fps: 30
+hook:
+  duration_ms: 2500
+  max_words: 7
+captions:
+  mode: sentence
+  font_size: 52
+  max_chars_per_line: 32
+  position: bottom
+visuals:
+  punch_in_count: 1
+  text_card_count: 1
+  allow_stock_broll: false
+audio:
+  normalize: true

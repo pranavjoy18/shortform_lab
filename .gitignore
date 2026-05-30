@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+#idea specific
+.idea/
+.vscode/
+
+# Secrets
+.env
+
+# Generated pipeline artifacts
+output/
+samples/
+
+# Legacy autoshorts (YouTube clip-finder) scratch dirs
+videos/
+clips/
+shorts/
+candidates/
+transcripts/
