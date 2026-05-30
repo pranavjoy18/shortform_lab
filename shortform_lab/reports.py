@@ -13,10 +13,10 @@ from pathlib import Path
 from .models import EditPlan, StyleConfig
 
 KNOWN_LIMITATIONS = [
-    "Captions are sentence-level, not word-level.",
     "Only the first punch-in is rendered; any others are kept in edit_plan.json.",
-    "Reframing is a static center-crop, so off-center speakers may be cropped.",
+    "Fill layout reframes with a static center-crop, so off-center speakers may be cropped.",
     "Overlays are simulated b-roll (text/quote cards), not real stock footage.",
+    "Tightening removes only silence/pauses — not filler words or repeated takes.",
 ]
 
 
@@ -29,6 +29,7 @@ def write_review(
     out_path: Path,
     used_llm: bool,
     llm_failed: bool = False,
+    source_duration_ms: int | None = None,
 ) -> Path:
     """Write ``review.md`` summarizing the run and return its path."""
     overlay_lines = (
@@ -44,6 +45,25 @@ def write_review(
     if used_llm and llm_failed:
         planner_label = "deterministic planner (LLM call failed — see planner_error.txt)"
 
+    if plan.keep_ranges:
+        kept_ms = sum(r.duration_ms for r in plan.keep_ranges)
+        cuts = len(plan.keep_ranges) - 1
+        src = f" of {_secs(source_duration_ms)}" if source_duration_ms else ""
+        tightening = (
+            f"- Kept {_secs(kept_ms)}{src} across {len(plan.keep_ranges)} span(s) "
+            f"({cuts} cut{'s' if cuts != 1 else ''})."
+        )
+    else:
+        tightening = "- Off (no cuts; full source rendered)."
+
+    if plan.hook is not None:
+        hook_block = (
+            f"> {plan.hook.text}\n\n"
+            f"Shown {_secs(plan.hook.start_ms)}–{_secs(plan.hook.end_ms)}."
+        )
+    else:
+        hook_block = "_No hook (disabled for this style)._"
+
     limitations = "\n".join(f"- {item}" for item in KNOWN_LIMITATIONS)
 
     md = f"""# Review
@@ -55,15 +75,16 @@ def write_review(
 - Export: {plan.export_width}x{plan.export_height} @ {plan.export_fps}fps
 
 ## Hook
-> {plan.hook.text}
-
-Shown {_secs(plan.hook.start_ms)}–{_secs(plan.hook.end_ms)}.
+{hook_block}
 
 ## Overlays
 {overlay_lines}
 
 ## Captions
-- {len(plan.captions)} caption cue(s), sentence-level.
+- {len(plan.captions)} caption cue(s) ({style.captions.mode}-level).
+
+## Tightening
+{tightening}
 
 ## Punch-ins
 - {len(plan.punch_ins)} planned; the first is rendered.

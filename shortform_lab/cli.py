@@ -43,6 +43,8 @@ def _main() -> None:
 def process(
     input_video: Path = typer.Argument(..., exists=True, dir_okay=False, help="Raw talking-head clip (mp4/mov)."),
     style: str = typer.Option("bold_creator", "--style", "-s", help="Style config name from configs/styles/."),
+    layout: str | None = typer.Option(None, "--layout", help="Override layout: 'fill' (crop) or 'letterbox' (fit + black bars)."),
+    tighten: bool | None = typer.Option(None, "--tighten/--no-tighten", help="Override silence/pause compression (default: per style)."),
     transcript: Path | None = typer.Option(None, "--transcript", "-t", help="Existing transcript JSON (skips transcription)."),
     use_llm: bool = typer.Option(False, "--use-llm", help="Use the OpenAI edit planner (falls back deterministically)."),
     output_dir: Path | None = typer.Option(None, "--output-dir", help="Override the auto-generated run folder."),
@@ -52,6 +54,14 @@ def process(
     ensure_ffmpeg_available()
 
     cfg = load_style_config(style)
+    # Layout is an axis independent of the caption style, so it can be overridden
+    # at the CLI to compose any caption style with either layout.
+    if layout is not None:
+        if layout not in ("fill", "letterbox"):
+            raise typer.BadParameter("--layout must be 'fill' or 'letterbox'.")
+        cfg.export.layout = layout
+    if tighten is not None:
+        cfg.tighten.enabled = tighten
 
     run_dir = output_dir or (OUTPUT_ROOT / _run_slug(input_video))
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -63,7 +73,8 @@ def process(
 
     # 2. Probe + extract audio.
     info = probe_video(source_copy)
-    typer.echo(f"→ Probed: {info.width}x{info.height}, {info.duration_ms/1000:.1f}s, audio={info.has_audio}")
+    typer.echo(f"→ Probed: {info.width}x{info.height}, {info.duration_ms/1000:.1f}s, "
+               f"audio={info.has_audio}, layout={cfg.export.layout}")
     audio_path = run_dir / "audio.wav"
     if info.has_audio:
         extract_audio(source_copy, audio_path, normalize=cfg.audio.normalize)
@@ -82,10 +93,16 @@ def process(
         source_video=source_copy.name,
         use_llm=use_llm,
         error_path=error_path,
+        source_duration_ms=info.duration_ms,
     )
     llm_failed = use_llm and error_path.is_file()
     (run_dir / "edit_plan.json").write_text(plan.model_dump_json(indent=2), encoding="utf-8")
-    typer.echo(f"→ Edit plan: hook=\"{plan.hook.text}\", "
+    if plan.keep_ranges:
+        kept_ms = sum(r.duration_ms for r in plan.keep_ranges)
+        typer.echo(f"→ Tightened: kept {kept_ms/1000:.1f}s of {info.duration_ms/1000:.1f}s "
+                   f"in {len(plan.keep_ranges)} span(s)")
+    hook_part = f'hook="{plan.hook.text}"' if plan.hook else "hook=off"
+    typer.echo(f"→ Edit plan: {hook_part}, "
                f"{len(plan.captions)} captions, {len(plan.overlays)} overlays, "
                f"{len(plan.punch_ins)} punch-ins")
 
@@ -102,6 +119,7 @@ def process(
         out_path=run_dir / "review.md",
         used_llm=use_llm,
         llm_failed=llm_failed,
+        source_duration_ms=info.duration_ms,
     )
     typer.echo(f"✓ Done. See {run_dir / 'review.md'} and {final_path}")
 

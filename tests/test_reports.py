@@ -26,6 +26,7 @@ def _plan() -> EditPlan:
 
 def test_write_review_includes_key_fields(tmp_path: Path):
     style = load_style_config("bold_creator")
+    style.visuals.overlays_enabled = True  # so the overlay listing is rendered
     out = tmp_path / "review.md"
     write_review(
         _plan(), style,

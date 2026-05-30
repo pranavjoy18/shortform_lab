@@ -1,0 +1,24 @@
+name: one_word
+export:
+  aspect_ratio: "9:16"
+  width: 1080
+  height: 1920
+  fps: 30
+hook:
+  duration_ms: 2500
+  max_words: 6
+captions:
+  mode: word
+  word_animation: one_word
+  highlight_color: "#FFFFFF"
+  max_words_per_group: 1
+  uppercase: true
+  font_size: 72
+  max_chars_per_line: 16
+  position: center
+visuals:
+  punch_in_count: 1
+  text_card_count: 0
+  allow_stock_broll: false
+audio:
+  normalize: true

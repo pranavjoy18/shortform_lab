@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .ffmpeg_tools import extract_audio
-from .models import Transcript, TranscriptSegment
+from .models import Transcript, TranscriptSegment, WordTiming
 
 
 class Transcriber(Protocol):
@@ -47,7 +47,10 @@ def load_transcript(path: Path) -> Transcript:
         if not text:
             continue
         start_ms, end_ms = _coerce_times(seg)
-        segments.append(TranscriptSegment(start_ms=start_ms, end_ms=end_ms, text=text))
+        words = _coerce_words(seg.get("words") or [])
+        segments.append(
+            TranscriptSegment(start_ms=start_ms, end_ms=end_ms, text=text, words=words)
+        )
 
     if not segments:
         raise ValueError(f"Transcript {path} contains no usable segments")
@@ -63,6 +66,25 @@ def _coerce_times(seg: dict) -> tuple[int, int]:
         # Seconds (possibly fractional) -> milliseconds.
         return int(round(float(seg["start"]) * 1000)), int(round(float(seg["end"]) * 1000))
     raise ValueError(f"Segment is missing timestamps: {seg!r}")
+
+
+def _coerce_words(words_raw: list) -> list[WordTiming]:
+    """Parse an optional per-segment word list, tolerating ms/seconds shapes.
+
+    Accepts ``{start_ms,end_ms,text}`` or the looser ``{start,end,word|text}``
+    (seconds) shape some tools emit. Words missing text or timestamps are skipped.
+    """
+    words: list[WordTiming] = []
+    for w in words_raw:
+        text = (w.get("text") or w.get("word") or "").strip()
+        if not text:
+            continue
+        try:
+            start_ms, end_ms = _coerce_times(w)
+        except ValueError:
+            continue
+        words.append(WordTiming(start_ms=start_ms, end_ms=end_ms, text=text))
+    return words
 
 
 class ProvidedTranscriptTranscriber:
@@ -104,20 +126,30 @@ class OpenAITranscriber:
                 model=self.model,
                 file=fh,
                 response_format="verbose_json",
-                timestamp_granularities=["segment"],
+                timestamp_granularities=["segment", "word"],
             )
+
+        all_words = [
+            WordTiming(
+                start_ms=int(round(float(w.start) * 1000)),
+                end_ms=int(round(float(w.end) * 1000)),
+                text=text,
+            )
+            for w in getattr(response, "words", []) or []
+            if (text := (getattr(w, "word", "") or "").strip())
+        ]
 
         segments: list[TranscriptSegment] = []
         for seg in getattr(response, "segments", []) or []:
             text = (getattr(seg, "text", "") or "").strip()
             if not text:
                 continue
+            start_ms = int(round(float(seg.start) * 1000))
+            end_ms = int(round(float(seg.end) * 1000))
+            # Bucket each word into the segment whose span contains its start.
+            seg_words = [w for w in all_words if start_ms <= w.start_ms < end_ms]
             segments.append(
-                TranscriptSegment(
-                    start_ms=int(round(float(seg.start) * 1000)),
-                    end_ms=int(round(float(seg.end) * 1000)),
-                    text=text,
-                )
+                TranscriptSegment(start_ms=start_ms, end_ms=end_ms, text=text, words=seg_words)
             )
         if not segments:
             raise RuntimeError("OpenAI transcription returned no segments")

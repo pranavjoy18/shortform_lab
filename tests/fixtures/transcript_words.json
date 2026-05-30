@@ -1,0 +1,26 @@
+{
+  "language": "en",
+  "segments": [
+    {
+      "start_ms": 0,
+      "end_ms": 1600,
+      "text": "Most people quit early.",
+      "words": [
+        {"start_ms": 0, "end_ms": 400, "text": "Most"},
+        {"start_ms": 400, "end_ms": 800, "text": "people"},
+        {"start_ms": 800, "end_ms": 1200, "text": "quit"},
+        {"start_ms": 1200, "end_ms": 1600, "text": "early"}
+      ]
+    },
+    {
+      "start_ms": 1600,
+      "end_ms": 3400,
+      "text": "Consistency beats intensity.",
+      "words": [
+        {"start": 1.6, "end": 2.4, "word": "Consistency"},
+        {"start": 2.4, "end": 2.9, "word": "beats"},
+        {"start": 2.9, "end": 3.4, "word": "intensity"}
+      ]
+    }
+  ]
+}

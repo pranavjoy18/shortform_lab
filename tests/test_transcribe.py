@@ -52,6 +52,22 @@ def test_load_transcript_no_segments_raises(tmp_path: Path):
         load_transcript(p)
 
 
+def test_load_transcript_parses_per_segment_words():
+    p = Path(__file__).parent / "fixtures" / "transcript_words.json"
+    t = load_transcript(p)
+    # First segment uses ms word shape, second uses seconds word shape.
+    assert [w.text for w in t.segments[0].words] == ["Most", "people", "quit", "early"]
+    assert t.segments[0].words[1].start_ms == 400
+    assert [w.text for w in t.segments[1].words] == ["Consistency", "beats", "intensity"]
+    assert t.segments[1].words[0].start_ms == 1600  # 1.6s -> ms
+
+
+def test_load_transcript_tolerates_missing_words():
+    # The ms sample fixture has no per-word data; words default to empty.
+    t = load_transcript(FIXTURE)
+    assert all(seg.words == [] for seg in t.segments)
+
+
 def test_provided_transcriber_returns_file_contents():
     transcriber = ProvidedTranscriptTranscriber(FIXTURE)
     t = transcriber.transcribe(Path("ignored.mp4"), work_dir=Path("."))

@@ -3,19 +3,26 @@
 from pathlib import Path
 
 from shortform_lab.config import load_style_config
-from shortform_lab.models import EditPlan
-from shortform_lab.planner import DeterministicPlanner, LLMPlanner, plan_edits
+from shortform_lab.models import EditPlan, Transcript, TranscriptSegment
+from shortform_lab.planner import DeterministicPlanner, LLMPlanner, build_captions, plan_edits
 from shortform_lab.transcribe import load_transcript
 
 FIXTURE = Path(__file__).parent / "fixtures" / "transcript_sample.json"
+WORDS_FIXTURE = Path(__file__).parent / "fixtures" / "transcript_words.json"
 
 
 def _transcript():
     return load_transcript(FIXTURE)
 
 
+def _words_transcript():
+    return load_transcript(WORDS_FIXTURE)
+
+
 def test_deterministic_plan_structure():
     style = load_style_config("bold_creator")
+    style.hook.enabled = True          # hook/overlays are off by default; enable
+    style.visuals.overlays_enabled = True  # to exercise the full plan structure
     plan = DeterministicPlanner().plan(_transcript(), style, source_video="source.mp4")
 
     assert isinstance(plan, EditPlan)
@@ -35,12 +42,24 @@ def test_deterministic_plan_structure():
     assert plan.reason
 
 
+def test_disabled_style_omits_hook_and_overlays():
+    # bold_creator ships with hook + overlays off: they are absent from the plan
+    # entirely (gated in the planner), not merely skipped at render time.
+    style = load_style_config("bold_creator")
+    plan = DeterministicPlanner().plan(_transcript(), style, source_video="source.mp4")
+    assert plan.hook is None
+    assert plan.overlays == []
+    assert plan.punch_ins  # punch-ins are unaffected
+
+
 def test_overlay_and_punchin_timestamps_exist_in_transcript():
     style = load_style_config("bold_creator")
+    style.visuals.overlays_enabled = True
     t = _transcript()
     plan = DeterministicPlanner().plan(t, style, source_video="source.mp4")
 
     starts = {s.start_ms for s in t.segments}
+    assert plan.overlays  # enabled, so present
     for overlay in plan.overlays:
         assert overlay.start_ms in starts
     for punch in plan.punch_ins:
@@ -50,6 +69,7 @@ def test_overlay_and_punchin_timestamps_exist_in_transcript():
 
 def test_clean_captions_style_yields_fewer_visuals():
     style = load_style_config("clean_captions")
+    style.visuals.overlays_enabled = True
     plan = DeterministicPlanner().plan(_transcript(), style, source_video="source.mp4")
     assert len(plan.overlays) <= 1
     assert len(plan.punch_ins) <= 1
@@ -59,6 +79,82 @@ def test_plan_edits_defaults_to_deterministic():
     style = load_style_config("bold_creator")
     plan = plan_edits(_transcript(), style, source_video="source.mp4")
     assert isinstance(plan, EditPlan)
+
+
+def test_build_captions_word_mode_uses_real_word_timings():
+    style = load_style_config("word_pop")  # active_word, group of 4
+    cues = build_captions(_words_transcript(), style)
+    # First segment has 4 words -> one group of 4; second has 3 -> one group of 3.
+    assert len(cues) == 2
+    assert [w.text for w in cues[0].words] == ["Most", "people", "quit", "early"]
+    assert cues[0].start_ms == 0 and cues[0].end_ms == 1600
+
+
+def test_build_captions_synthesizes_words_when_absent():
+    style = load_style_config("word_pop")
+    # The sample fixture is segment-only; word timings must be synthesized.
+    cues = build_captions(_transcript(), style)
+    assert cues, "expected word-group cues"
+    for cue in cues:
+        assert cue.words, "each word-mode cue must carry word timings"
+        # Synthesized words stay within their cue span and keep order.
+        assert cue.words[0].start_ms >= cue.start_ms
+        assert cue.words[-1].end_ms <= cue.end_ms
+    # Groups never exceed the configured size.
+    assert max(len(c.words) for c in cues) <= style.captions.max_words_per_group
+
+
+def test_build_captions_one_word_yields_single_word_cues():
+    style = load_style_config("one_word")
+    cues = build_captions(_words_transcript(), style)
+    assert all(len(c.words) == 1 for c in cues)
+    assert [c.text for c in cues] == ["Most", "people", "quit", "early",
+                                      "Consistency", "beats", "intensity"]
+
+
+def test_build_captions_sentence_mode_has_no_words():
+    style = load_style_config("bold_creator")
+    cues = build_captions(_transcript(), style)
+    assert len(cues) == 5
+    assert all(c.words == [] for c in cues)
+
+
+def test_deterministic_word_style_plan_carries_word_cues():
+    style = load_style_config("word_pop")
+    plan = DeterministicPlanner().plan(_words_transcript(), style, source_video="source.mp4")
+    assert all(c.words for c in plan.captions)
+
+
+def test_plan_edits_tightens_when_enabled():
+    style = load_style_config("bold_creator")
+    style.tighten.enabled = True
+    # Two phrases with a 3s dead-air gap between them.
+    t = Transcript(segments=[
+        TranscriptSegment(start_ms=0, end_ms=1000, text="Hello there friend."),
+        TranscriptSegment(start_ms=4000, end_ms=5000, text="Welcome back everyone."),
+    ])
+    plan = plan_edits(t, style, source_video="s.mp4", source_duration_ms=5000)
+    assert plan.keep_ranges, "tightening should produce a cut list"
+    # Captions are in output time: they start at 0 and the gap is compressed.
+    assert plan.captions[0].start_ms == 0
+    assert plan.captions[-1].start_ms < 4000
+
+
+def test_plan_edits_no_tighten_leaves_keep_ranges_empty():
+    style = load_style_config("bold_creator")  # tighten disabled by default
+    plan = plan_edits(_transcript(), style, source_video="s.mp4")
+    assert plan.keep_ranges == []
+
+
+def test_plan_pins_export_layout_from_style():
+    fill = DeterministicPlanner().plan(
+        _transcript(), load_style_config("bold_creator"), source_video="s.mp4"
+    )
+    box = DeterministicPlanner().plan(
+        _transcript(), load_style_config("reels_letterbox"), source_video="s.mp4"
+    )
+    assert fill.export_layout == "fill"
+    assert box.export_layout == "letterbox"
 
 
 def test_llm_planner_falls_back_and_writes_error(tmp_path: Path, monkeypatch):
@@ -80,6 +176,7 @@ def test_llm_planner_falls_back_and_writes_error(tmp_path: Path, monkeypatch):
 
 def test_llm_planner_parses_valid_json(tmp_path: Path, monkeypatch):
     style = load_style_config("bold_creator")
+    style.hook.enabled = True  # so the parsed hook is kept in the plan
     planner = LLMPlanner()
 
     fake = (
@@ -98,3 +195,24 @@ def test_llm_planner_parses_valid_json(tmp_path: Path, monkeypatch):
     assert plan.export_width == style.export.width
     assert plan.export_fps == style.export.fps
     assert plan.source_video == "source.mp4"
+
+
+def test_llm_word_style_rebuilds_captions_from_transcript(monkeypatch):
+    """In word mode the LLM keeps hook/overlays, but captions (and their word
+    timings) are rebuilt from the transcript, not taken from the model."""
+    style = load_style_config("word_pop")
+    style.hook.enabled = True  # so the LLM hook is kept; captions still rebuilt
+    planner = LLMPlanner()
+    fake = (
+        '{"source_video": "x", "hook": {"text": "Stop quitting", '
+        '"start_ms": 0, "end_ms": 2800}, '
+        '"captions": [{"start_ms": 0, "end_ms": 99999, "text": "model line with no words"}], '
+        '"overlays": [], "punch_ins": [], '
+        '"export_width": 1, "export_height": 1, "export_fps": 1, "reason": "x"}'
+    )
+    monkeypatch.setattr(planner, "_call_llm", lambda *a, **k: fake)
+    plan = planner.plan(_words_transcript(), style, source_video="source.mp4")
+
+    assert plan.hook.text == "Stop quitting"          # LLM choice kept
+    assert all(c.words for c in plan.captions)         # captions rebuilt with words
+    assert plan.captions[0].words[0].text == "Most"    # from the transcript

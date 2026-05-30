@@ -27,9 +27,13 @@ from .models import (
     Hook,
     PunchIn,
     StyleConfig,
+    TimeRange,
     Transcript,
+    TranscriptSegment,
     VisualOverlay,
+    WordTiming,
 )
+from .tighten import compute_keep_ranges, tighten_transcript
 
 
 # --------------------------------------------------------------------------- #
@@ -43,12 +47,11 @@ class DeterministicPlanner:
         if not segments:
             raise ValueError("Cannot plan edits from an empty transcript")
 
-        hook = self._make_hook(transcript, style)
-        captions = [
-            CaptionCue(start_ms=s.start_ms, end_ms=s.end_ms, text=s.text.strip())
-            for s in segments
-        ]
-        overlays = self._make_overlays(transcript, style)
+        # Hook and overlays are gated here (not in the renderer): when off, they
+        # simply aren't in the plan, so edit_plan.json/echo/video all agree.
+        hook = self._make_hook(transcript, style) if style.hook.enabled else None
+        captions = build_captions(transcript, style)
+        overlays = self._make_overlays(transcript, style) if style.visuals.overlays_enabled else []
         punch_ins = self._make_punch_ins(transcript, style)
 
         return EditPlan(
@@ -60,6 +63,7 @@ class DeterministicPlanner:
             export_width=style.export.width,
             export_height=style.export.height,
             export_fps=style.export.fps,
+            export_layout=style.export.layout,
             reason=(
                 "Deterministic plan: hook drawn from the opening line, "
                 "sentence-level captions from the transcript, "
@@ -155,6 +159,15 @@ class LLMPlanner:
         try:
             raw = self._call_llm(transcript, style, source_video=source_video)
             plan = self._parse_plan(raw, style, source_video=source_video)
+            # Word-level timing must come from the transcript, not the LLM (it
+            # cannot supply reliable per-word ms). Punch-ins stay the LLM's choice.
+            if style.captions.mode == "word":
+                plan.captions = build_captions(transcript, style)
+            # Honor the same gating as the deterministic planner.
+            if not style.hook.enabled:
+                plan.hook = None
+            if not style.visuals.overlays_enabled:
+                plan.overlays = []
             return plan
         except Exception as exc:  # noqa: BLE001 - any failure must fall back
             if error_path is not None:
@@ -223,6 +236,7 @@ class LLMPlanner:
         data["export_width"] = style.export.width
         data["export_height"] = style.export.height
         data["export_fps"] = style.export.fps
+        data["export_layout"] = style.export.layout
         return EditPlan.model_validate(data)
 
 
@@ -237,13 +251,91 @@ def plan_edits(
     use_llm: bool = False,
     model: str = "gpt-4o-mini",
     error_path: Path | None = None,
+    source_duration_ms: int | None = None,
 ) -> EditPlan:
-    """Plan edits, using the LLM if requested and falling back deterministically."""
-    if use_llm:
-        return LLMPlanner(model=model).plan(
-            transcript, style, source_video=source_video, error_path=error_path
+    """Plan edits, optionally tightening silence first and using the LLM if requested.
+
+    When ``style.tighten.enabled``, silences are compressed before planning: the
+    transcript is remapped onto the tightened (output) timeline so every plan
+    element lands in output time, and the resulting cut list (source spans) is
+    stamped onto ``plan.keep_ranges`` for the renderer. With tightening off (or no
+    cut), ``keep_ranges`` stays empty and behavior is identical to before.
+    """
+    keep_ranges: list[TimeRange] = []
+    working = transcript
+    if style.tighten.enabled:
+        duration = source_duration_ms or transcript.duration_ms
+        keep_ranges = compute_keep_ranges(
+            transcript,
+            max_silence_ms=style.tighten.max_silence_ms,
+            pad_ms=style.tighten.pad_ms,
+            source_duration_ms=duration,
         )
-    return DeterministicPlanner().plan(transcript, style, source_video=source_video)
+        working = tighten_transcript(transcript, keep_ranges)
+
+    if use_llm:
+        plan = LLMPlanner(model=model).plan(
+            working, style, source_video=source_video, error_path=error_path
+        )
+    else:
+        plan = DeterministicPlanner().plan(working, style, source_video=source_video)
+
+    plan.keep_ranges = keep_ranges
+    return plan
+
+
+# --------------------------------------------------------------------------- #
+# Caption building (shared by both planners)
+# --------------------------------------------------------------------------- #
+def build_captions(transcript: Transcript, style: StyleConfig) -> list[CaptionCue]:
+    """Turn a transcript into caption cues according to the style's caption mode.
+
+    Sentence mode yields one cue per segment with no word timings. Word mode
+    yields short word *groups*, each cue carrying the per-word timings the
+    renderer animates. When a segment lacks word timings (e.g. a segment-only
+    transcript), even-spaced timings are synthesized so the word look still works.
+    """
+    if style.captions.mode == "sentence":
+        return [
+            CaptionCue(start_ms=s.start_ms, end_ms=s.end_ms, text=s.text.strip())
+            for s in transcript.segments
+        ]
+
+    group_size = (
+        1 if style.captions.word_animation == "one_word" else style.captions.max_words_per_group
+    )
+    cues: list[CaptionCue] = []
+    for seg in transcript.segments:
+        words = seg.words or _synthesize_words(seg)
+        for group in _chunk(words, group_size):
+            cues.append(
+                CaptionCue(
+                    start_ms=group[0].start_ms,
+                    end_ms=group[-1].end_ms,
+                    text=" ".join(w.text for w in group),
+                    words=list(group),
+                )
+            )
+    return cues
+
+
+def _synthesize_words(seg: TranscriptSegment) -> list[WordTiming]:
+    """Spread a segment's words evenly across its span (timing fallback)."""
+    tokens = seg.text.split()
+    if not tokens:
+        return []
+    span = max(seg.end_ms - seg.start_ms, len(tokens))
+    per = span / len(tokens)
+    words: list[WordTiming] = []
+    for i, tok in enumerate(tokens):
+        start = seg.start_ms + int(round(i * per))
+        end = seg.end_ms if i == len(tokens) - 1 else seg.start_ms + int(round((i + 1) * per))
+        words.append(WordTiming(start_ms=start, end_ms=max(end, start), text=tok))
+    return words
+
+
+def _chunk(items: list, size: int) -> list[list]:
+    return [items[i : i + size] for i in range(0, len(items), size)]
 
 
 # --------------------------------------------------------------------------- #

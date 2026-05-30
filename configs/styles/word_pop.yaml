@@ -1,0 +1,24 @@
+name: word_pop
+export:
+  aspect_ratio: "9:16"
+  width: 1080
+  height: 1920
+  fps: 30
+hook:
+  duration_ms: 2800
+  max_words: 8
+captions:
+  mode: word
+  word_animation: active_word
+  highlight_color: "#FFE000"
+  max_words_per_group: 4
+  uppercase: true
+  font_size: 60
+  max_chars_per_line: 28
+  position: bottom
+visuals:
+  punch_in_count: 2
+  text_card_count: 1
+  allow_stock_broll: false
+audio:
+  normalize: true
