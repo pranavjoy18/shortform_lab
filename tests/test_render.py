@@ -200,8 +200,8 @@ def test_concat_filtergraph_trims_and_concats():
     )
     assert "trim=start=0.000:end=1.000" in graph
     assert "atrim=start=2.000:end=3.000" in graph
-    assert "concat=n=2:v=1:a=1[cv][ca]" in graph
-    assert "[cv]scale=1080:1920,subtitles=captions.ass[vout]" in graph
+    assert "concat=n=2:v=1:a=1[vcat][acat]" in graph
+    assert "[vcat]scale=1080:1920,subtitles=captions.ass[vout]" in graph
     assert "loudnorm[aout]" in graph and audio == "[aout]"
 
 
@@ -211,7 +211,7 @@ def test_concat_filtergraph_without_audio():
     graph, audio = build_concat_filtergraph(
         plan, "scale=1,subtitles=c.ass", has_audio=False, normalize=False
     )
-    assert "concat=n=1:v=1:a=0[cv]" in graph
+    assert "concat=n=1:v=1:a=0[vcat]" in graph
     assert "atrim" not in graph
     assert audio is None
 
