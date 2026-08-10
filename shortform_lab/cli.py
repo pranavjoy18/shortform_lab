@@ -20,12 +20,14 @@ from pathlib import Path
 import typer
 from dotenv import load_dotenv
 
-from .config import load_style_config
+from .config import available_styles, load_style_config
 from .ffmpeg_tools import ensure_ffmpeg_available, extract_audio, probe_video
 from .models import Transcript
-from .planner import plan_edits
+from .planner import plan_timeline
 from .reports import write_review
 from .render import render_video
+from .skills.color import LOOKS
+from .timeline import timeline_to_editplan
 from .transcribe import OpenAITranscriber, load_transcript
 
 app = typer.Typer(add_completion=False, help="Local talking-head video enhancer.")
@@ -45,23 +47,41 @@ def process(
     style: str = typer.Option("bold_creator", "--style", "-s", help="Style config name from configs/styles/."),
     layout: str | None = typer.Option(None, "--layout", help="Override layout: 'fill' (crop) or 'letterbox' (fit + black bars)."),
     tighten: bool | None = typer.Option(None, "--tighten/--no-tighten", help="Override silence/pause compression (default: per style)."),
+    color: str | None = typer.Option(None, "--color", help="Override color grade with a named look (e.g. cinematic, vivid, mono)."),
     transcript: Path | None = typer.Option(None, "--transcript", "-t", help="Existing transcript JSON (skips transcription)."),
-    use_llm: bool = typer.Option(False, "--use-llm", help="Use the OpenAI edit planner (falls back deterministically)."),
+    use_llm: bool = typer.Option(False, "--use-llm", help="Use the agentic edit planner (falls back deterministically)."),
+    interactive: bool = typer.Option(False, "--interactive", "-i", help="Before planning, ask creative-intent questions in the terminal (implies --use-llm)."),
     output_dir: Path | None = typer.Option(None, "--output-dir", help="Override the auto-generated run folder."),
 ) -> None:
     """Process one clip into a polished vertical short."""
     load_dotenv()
     ensure_ffmpeg_available()
 
-    cfg = load_style_config(style)
-    # Layout is an axis independent of the caption style, so it can be overridden
-    # at the CLI to compose any caption style with either layout.
+    if interactive:
+        # Setup interview: let the user pick style, layout, color, caps, tighten.
+        # Explicit CLI flags still override the interview choices (applied below).
+        from .intent import SetupInterview
+        choices = SetupInterview().run(available_styles=available_styles())
+        cfg = load_style_config(choices.style_name)
+        cfg.export.layout = choices.layout
+        cfg.tighten.enabled = choices.tighten
+        cfg.captions.uppercase = choices.uppercase
+        if choices.color_look is not None:
+            cfg.color.look = choices.color_look
+    else:
+        cfg = load_style_config(style)
+
+    # Explicit CLI flags take precedence over both defaults and interview choices.
     if layout is not None:
         if layout not in ("fill", "letterbox"):
             raise typer.BadParameter("--layout must be 'fill' or 'letterbox'.")
         cfg.export.layout = layout
     if tighten is not None:
         cfg.tighten.enabled = tighten
+    if color is not None:
+        if color not in LOOKS:
+            raise typer.BadParameter(f"--color must be one of: {sorted(LOOKS)}")
+        cfg.color.look = color
 
     run_dir = output_dir or (OUTPUT_ROOT / _run_slug(input_video))
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -86,29 +106,37 @@ def process(
     )
     typer.echo(f"→ Transcript: {len(transcript_obj.segments)} segment(s)")
 
-    # 4. Plan edits.
+    # 4. Plan edits. The Timeline is the richer artifact; edit_plan.json is the
+    #    renderer-facing adapter view of it.
+    use_llm = use_llm or interactive  # --interactive implies --use-llm
     error_path = run_dir / "planner_error.txt"
-    plan = plan_edits(
+    timeline = plan_timeline(
         transcript_obj, cfg,
         source_video=source_copy.name,
         use_llm=use_llm,
+        interactive=interactive,
         error_path=error_path,
         source_duration_ms=info.duration_ms,
     )
     llm_failed = use_llm and error_path.is_file()
+    plan = timeline_to_editplan(timeline)
+    (run_dir / "timeline.json").write_text(timeline.model_dump_json(indent=2), encoding="utf-8")
     (run_dir / "edit_plan.json").write_text(plan.model_dump_json(indent=2), encoding="utf-8")
     if plan.keep_ranges:
         kept_ms = sum(r.duration_ms for r in plan.keep_ranges)
         typer.echo(f"→ Tightened: kept {kept_ms/1000:.1f}s of {info.duration_ms/1000:.1f}s "
                    f"in {len(plan.keep_ranges)} span(s)")
     hook_part = f'hook="{plan.hook.text}"' if plan.hook else "hook=off"
+    color_part = f", color={cfg.color.look}" if timeline.color is not None else ""
     typer.echo(f"→ Edit plan: {hook_part}, "
                f"{len(plan.captions)} captions, {len(plan.overlays)} overlays, "
-               f"{len(plan.punch_ins)} punch-ins")
+               f"{len(plan.punch_ins)} punch-ins{color_part}")
 
-    # 5. Render.
+    # 5. Render. Pass the Timeline so the renderer can read Timeline-direct tracks
+    #    (the color grade) that the EditPlan does not carry.
     final_path = run_dir / "final.mp4"
-    render_video(plan, source_copy, final_path, cfg, has_audio=info.has_audio, work_dir=run_dir)
+    render_video(plan, source_copy, final_path, cfg, has_audio=info.has_audio,
+                 work_dir=run_dir, timeline=timeline)
     typer.echo(f"→ Rendered: {final_path}")
 
     # 6. Review report.

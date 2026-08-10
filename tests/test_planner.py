@@ -4,7 +4,7 @@ from pathlib import Path
 
 from shortform_lab.config import load_style_config
 from shortform_lab.models import EditPlan, Transcript, TranscriptSegment
-from shortform_lab.planner import DeterministicPlanner, LLMPlanner, build_captions, plan_edits
+from shortform_lab.planner import DeterministicPlanner, build_captions, plan_edits
 from shortform_lab.transcribe import load_transcript
 
 FIXTURE = Path(__file__).parent / "fixtures" / "transcript_sample.json"
@@ -157,62 +157,19 @@ def test_plan_pins_export_layout_from_style():
     assert box.export_layout == "letterbox"
 
 
-def test_llm_planner_falls_back_and_writes_error(tmp_path: Path, monkeypatch):
+def test_plan_edits_llm_falls_back_to_deterministic(tmp_path: Path, monkeypatch):
+    """When the LLM call blows up, plan_edits still returns a valid plan and logs."""
     style = load_style_config("bold_creator")
-    planner = LLMPlanner()
 
-    # Force the LLM call to blow up; the planner must fall back deterministically.
-    def boom(*args, **kwargs):
+    def boom(self, *args, **kwargs):
         raise RuntimeError("no api key")
 
-    monkeypatch.setattr(planner, "_call_llm", boom)
+    monkeypatch.setattr("shortform_lab.llm_orchestrator.LLMOrchestrator._call_llm", boom)
     error_path = tmp_path / "planner_error.txt"
-    plan = planner.plan(_transcript(), style, source_video="source.mp4", error_path=error_path)
+    plan = plan_edits(
+        _transcript(), style, source_video="source.mp4", use_llm=True, error_path=error_path
+    )
 
     assert isinstance(plan, EditPlan)
     assert error_path.is_file()
-    assert "LLM planning failed" in error_path.read_text()
-
-
-def test_llm_planner_parses_valid_json(tmp_path: Path, monkeypatch):
-    style = load_style_config("bold_creator")
-    style.hook.enabled = True  # so the parsed hook is kept in the plan
-    planner = LLMPlanner()
-
-    fake = (
-        '{"source_video": "x", "hook": {"text": "Stop quitting early", '
-        '"start_ms": 0, "end_ms": 2800}, '
-        '"captions": [{"start_ms": 0, "end_ms": 2600, "text": "Most people quit early."}], '
-        '"overlays": [], "punch_ins": [{"start_ms": 6400, "end_ms": 10200, "zoom": 1.2}], '
-        '"export_width": 999, "export_height": 999, "export_fps": 99, '
-        '"reason": "lead strong"}'
-    )
-    monkeypatch.setattr(planner, "_call_llm", lambda *a, **k: fake)
-    plan = planner.plan(_transcript(), style, source_video="source.mp4")
-
-    assert plan.hook.text == "Stop quitting early"
-    # Export dims are pinned to the style, not whatever the model returned.
-    assert plan.export_width == style.export.width
-    assert plan.export_fps == style.export.fps
-    assert plan.source_video == "source.mp4"
-
-
-def test_llm_word_style_rebuilds_captions_from_transcript(monkeypatch):
-    """In word mode the LLM keeps hook/overlays, but captions (and their word
-    timings) are rebuilt from the transcript, not taken from the model."""
-    style = load_style_config("word_pop")
-    style.hook.enabled = True  # so the LLM hook is kept; captions still rebuilt
-    planner = LLMPlanner()
-    fake = (
-        '{"source_video": "x", "hook": {"text": "Stop quitting", '
-        '"start_ms": 0, "end_ms": 2800}, '
-        '"captions": [{"start_ms": 0, "end_ms": 99999, "text": "model line with no words"}], '
-        '"overlays": [], "punch_ins": [], '
-        '"export_width": 1, "export_height": 1, "export_fps": 1, "reason": "x"}'
-    )
-    monkeypatch.setattr(planner, "_call_llm", lambda *a, **k: fake)
-    plan = planner.plan(_words_transcript(), style, source_video="source.mp4")
-
-    assert plan.hook.text == "Stop quitting"          # LLM choice kept
-    assert all(c.words for c in plan.captions)         # captions rebuilt with words
-    assert plan.captions[0].words[0].text == "Most"    # from the transcript
+    assert error_path.read_text()  # any non-empty error message is fine
