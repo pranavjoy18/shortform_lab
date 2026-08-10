@@ -1,0 +1,43 @@
+name: viral_creator
+export:
+  aspect_ratio: "9:16"
+  width: 1080
+  height: 1920
+  fps: 30
+hook:
+  enabled: true
+  duration_ms: 2500
+  max_words: 7
+captions:
+  mode: word
+  font_size: 72
+  max_chars_per_line: 20
+  position: bottom
+  word_animation: active_word
+  highlight_color: "#FF3B30"
+  max_words_per_group: 3
+  uppercase: true
+  font_family: "Impact"
+  animation_in: fly_up
+visuals:
+  punch_in_count: 2
+  text_card_count: 0
+  allow_stock_broll: false
+  overlays_enabled: false
+  lower_third_enabled: false
+  lower_third_text: null
+  lower_third_sub: null
+audio:
+  normalize: true
+  denoise: true
+tighten:
+  enabled: true
+  max_silence_ms: 300
+  pad_ms: 80
+  remove_fillers: false
+color:
+  look: vivid
+transitions:
+  enabled: true
+  transition_type: fade
+  duration_ms: 250
