@@ -23,6 +23,57 @@ input video
   -> write review report
 ```
 
+## Architecture
+
+**[Interactive architecture preview →](https://claude.ai/code/artifact/b30bb625-93db-4ddb-b82e-388387fdf563)**
+(full write-up: [`docs/architecture.md`](docs/architecture.md))
+
+The whole design rests on one rule: **agents decide, deterministic code
+executes and verifies.** `plan_edits` branches exactly once — into a
+`DeterministicOrchestrator` (no LLM, always available) or an `LLMOrchestrator`
+(`--use-llm`, picks skills and parameters from a fixed toolbox, never a
+timestamp or export setting, and falls back to the deterministic path on any
+failure). Both converge on the same `compose_timeline` engine, the same
+coherence gate, and the same renderer.
+
+```mermaid
+flowchart TD
+    A["source clip<br/>input.mp4"] --> C["plan_edits"]
+    B["transcript (optional)<br/>Whisper or --transcript"] --> C
+    C --> D["Deterministic Orchestrator<br/>preset_from_style → gated skill set"]
+    C --> E["LLM Orchestrator (--use-llm)<br/>toolbox.py → SkillPlan"]
+    E -. "falls back on any failure" .-> D
+    D --> F["compose_timeline<br/>topo-order skills · run · remap transcript"]
+    E --> F
+    F --> G["coherence gate<br/>validate_timeline"]
+    G --> H["Timeline<br/>timeline.json"]
+    H -->|timeline_to_editplan| I["EditPlan<br/>edit_plan.json"]
+    I --> J["render_video (FFmpeg)"]
+    J --> K["final.mp4"]
+    J --> L["review.md"]
+```
+
+Skill run order is never hand-maintained — `compose_timeline` derives it from
+each skill's declared `reads`/`writes`, so `tighten_silence` (the only writer
+of the spine) always runs before every skill that reads it:
+
+```mermaid
+flowchart TD
+    T["tighten_silence<br/>writes: spine"] --> CAP["add_captions<br/>reads: spine"]
+    T --> HK["hook<br/>reads: spine"]
+    T --> OV["overlay<br/>reads: spine"]
+    T --> PI["punch_in<br/>reads: spine"]
+```
+
+Invariants that always hold:
+
+- Skills edit the Timeline only — nothing above the renderer touches FFmpeg or a pixel.
+- The Timeline is validated before render; an invalid Timeline never reaches FFmpeg.
+- The deterministic, offline path is the default; `--use-llm` is opt-in and always has a fallback.
+- A disabled feature is absent from the Timeline entirely — the JSON, the logs, and the video always agree.
+- `timeline.json` and `edit_plan.json` stay hand-editable and re-renderable.
+- Timestamps are integer milliseconds everywhere in stored shapes — no float-seconds creep in.
+
 ## Requirements
 
 - Python 3.12+
