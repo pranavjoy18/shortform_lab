@@ -36,13 +36,20 @@ class Preset:
     skills: tuple[Skill, ...]
 
 
-def preset_from_style(style: StyleConfig, *, tighten: bool = True) -> Preset:
+def preset_from_style(style: StyleConfig, *, tighten: bool = True, debug: bool = False) -> Preset:
     """Build the deterministic preset for a style.
 
     Feature gating happens here (not in the renderer): a disabled feature's skill
     is simply omitted, so it is absent from the resulting Timeline. ``tighten`` can
     force silence compression off regardless of the style (used by the legacy
     ``DeterministicPlanner`` path, which tightens elsewhere).
+
+    The hook is additionally gated on ``debug``: the deterministic hook is purely
+    extractive (opening line, word-capped — see ``skills/hook.py``), never a real
+    written hook, so it never ships to real users. It renders only under
+    ``--debug``, for inspecting the extractive fallback itself. The generative
+    (LLM/agentic) path is unaffected — it writes real hook copy and is gated by
+    the LLM's own skill choice, not this flag.
     """
     skills: list[Skill] = []
     if tighten and style.tighten.enabled:
@@ -55,7 +62,7 @@ def preset_from_style(style: StyleConfig, *, tighten: bool = True) -> Preset:
         )
     # Phase 0: always detect beats so decoration skills have anchors available.
     skills.append(BeatSegmenterSkill())
-    if style.hook.enabled:
+    if style.hook.enabled and debug:
         skills.append(HookSkill())
     skills.append(CaptionSkill())
     if style.visuals.overlays_enabled:

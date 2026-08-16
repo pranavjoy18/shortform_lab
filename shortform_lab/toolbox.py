@@ -41,11 +41,38 @@ class TightenParams(BaseModel):
 
 
 class HookParams(BaseModel):
+    text: str | None = Field(
+        default=None, max_length=80,
+        description=(
+            "The hook copy itself, written by you — a short, punchy tease for the "
+            "first ~2-3 seconds. Do NOT copy the transcript's opening sentence "
+            "verbatim: the caption track will already show that sentence at the "
+            "same time, so a hook that repeats it is dead screen space, not a hook. "
+            "Write a distinct line that creates curiosity about where the clip is "
+            "going (a question, a stat, a contrarian claim) — 4-8 words."
+        ),
+    )
     max_words: int | None = Field(default=None, gt=0, description="Word cap for the hook overlay.")
 
 
 class CaptionParams(BaseModel):
-    pass  # caption look (sentence vs word) is style/transcript-bound, not the LLM's call
+    # Caption text/timing is never the LLM's call — always the transcript. This is
+    # the one exception: which (if any) already-correct words get accent-colored
+    # in "active_word" rendering. Deterministically this is always empty (no
+    # emphasis) — it exists so the generative path can be selective instead of
+    # mechanically highlighting every single word as it's spoken.
+    emphasize: list[str] | None = Field(
+        default=None,
+        description=(
+            "Exact words/short phrases (verbatim substrings of the transcript) to "
+            "accent-highlight as they're spoken — only for styles whose "
+            "word_animation is 'active_word'; ignored otherwise. Be selective: "
+            "highlighting every word defeats the point. Only flag words that are "
+            "genuinely load-bearing (a number, a name, the punchline) — most "
+            "clips need few or none. Omit or leave empty for no emphasis at all, "
+            "which is the right choice more often than not."
+        ),
+    )
 
 
 class OverlayParams(BaseModel):
@@ -115,13 +142,15 @@ TOOLBOX: dict[str, ToolSpec] = {
     ),
     "hook": ToolSpec(
         HookParams,
-        lambda p, style: HookSkill(max_words=p.max_words),
-        "Add a punchy opening text overlay derived from the first line.",
+        lambda p, style: HookSkill(max_words=p.max_words, text=p.text),
+        "Add a punchy opening text overlay you write yourself — a curiosity tease, "
+        "not a repeat of the transcript (captions already cover that).",
     ),
     "add_captions": ToolSpec(
         CaptionParams,
-        lambda p, style: CaptionSkill(),
-        "Burn in captions covering the speech. Recommended on almost every short.",
+        lambda p, style: CaptionSkill(emphasize=tuple(p.emphasize or ())),
+        "Burn in captions covering the speech (recommended on almost every short). "
+        "Optionally flag a few words for accent-highlight emphasis — sparingly.",
     ),
     "overlay": ToolSpec(
         OverlayParams,

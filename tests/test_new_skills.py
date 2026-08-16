@@ -64,7 +64,7 @@ def _make_context(style_name="bold_creator"):
 
 def test_viral_creator_style_loads():
     style = load_style_config("viral_creator")
-    assert style.captions.font_family == "Impact"
+    assert style.captions.font_family == "Anton"
     assert style.captions.animation_in == "fly_up"
     assert style.transitions.enabled is True
     assert style.transitions.transition_type == "fade"
@@ -78,19 +78,30 @@ def test_ass_uses_style_font(tmp_path: Path):
         export_width=1080, export_height=1920, export_fps=30,
     )
     content = write_captions_ass(plan, style, tmp_path / "c.ass").read_text()
-    assert "Impact" in content
+    assert "Anton" in content
     assert "FreeSans" not in content
 
 
 def test_ass_default_font_when_not_set(tmp_path: Path):
-    style = load_style_config("bold_creator")  # no font_family set → FreeSans default
+    # A style whose CaptionSettings never sets font_family falls back to the
+    # Pydantic default (a bundled font, not the old system "FreeSans").
+    from shortform_lab.models import CaptionSettings, ExportSettings, HookSettings, StyleConfig, VisualSettings
+
+    style = StyleConfig(
+        name="no_font_set",
+        export=ExportSettings(width=1080, height=1920, fps=30),
+        hook=HookSettings(duration_ms=2000, max_words=6),
+        captions=CaptionSettings(font_size=54, max_chars_per_line=28),
+        visuals=VisualSettings(punch_in_count=0, text_card_count=0),
+    )
     plan = EditPlan(
         source_video="s.mp4",
         captions=[CaptionCue(start_ms=0, end_ms=1000, text="Test")],
         export_width=1080, export_height=1920, export_fps=30,
     )
     content = write_captions_ass(plan, style, tmp_path / "c.ass").read_text()
-    assert "FreeSans" in content
+    assert "Poppins ExtraBold" in content
+    assert "FreeSans" not in content
 
 
 def test_animation_prefix_none():

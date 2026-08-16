@@ -35,6 +35,11 @@ class WordTiming(BaseModel):
     start_ms: int = Field(ge=0)
     end_ms: int = Field(ge=0)
     text: str
+    # Accent-highlight this specific word in "active_word" rendering. False for
+    # every word by default — the deterministic path never guesses at emphasis;
+    # only the generative path sets this, and only on words it judges genuinely
+    # important (see toolbox.CaptionParams.emphasize). Never affects text/timing.
+    emphasize: bool = False
 
     @model_validator(mode="after")
     def _check_order(self) -> "WordTiming":
@@ -298,8 +303,9 @@ class CaptionSettings(BaseModel):
     max_words_per_group: int = Field(gt=0, default=4)
     # Uppercase caption text for a bolder look.
     uppercase: bool = False
-    # Font family passed to libass. Falls back to system default when not found.
-    font_family: str = "FreeSans"
+    # Font family passed to libass, resolved via the bundled fonts in
+    # assets/fonts/ (render.FONTS_DIR) first, then any matching system font.
+    font_family: str = "Poppins ExtraBold"
     # Caption entrance animation: none (hard cut in), fade (opacity), fly_up (slide).
     animation_in: Literal["none", "fade", "fly_up"] = "none"
 

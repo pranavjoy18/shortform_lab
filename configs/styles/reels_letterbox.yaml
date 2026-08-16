@@ -19,6 +19,7 @@ captions:
   max_chars_per_line: 24
   # Captions land in the bottom black bar in letterbox layout.
   position: bottom
+  font_family: "Bebas Neue"
 visuals:
   punch_in_count: 0
   text_card_count: 0

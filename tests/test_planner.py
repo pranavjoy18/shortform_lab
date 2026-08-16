@@ -23,7 +23,9 @@ def test_deterministic_plan_structure():
     style = load_style_config("bold_creator")
     style.hook.enabled = True          # hook/overlays are off by default; enable
     style.visuals.overlays_enabled = True  # to exercise the full plan structure
-    plan = DeterministicPlanner().plan(_transcript(), style, source_video="source.mp4")
+    # debug=True: the deterministic hook is extractive-only and gated behind
+    # --debug (real hook copy is the generative path's job).
+    plan = DeterministicPlanner().plan(_transcript(), style, source_video="source.mp4", debug=True)
 
     assert isinstance(plan, EditPlan)
     assert plan.export_width == style.export.width
@@ -164,7 +166,12 @@ def test_plan_edits_llm_falls_back_to_deterministic(tmp_path: Path, monkeypatch)
     def boom(self, *args, **kwargs):
         raise RuntimeError("no api key")
 
-    monkeypatch.setattr("shortform_lab.llm_orchestrator.LLMOrchestrator._call_llm", boom)
+    # use_llm=True routes through AgenticOrchestrator (LLMOrchestrator is the
+    # legacy one-shot class, no longer wired to plan_timeline/plan_edits) — patch
+    # the class actually used, deterministically, instead of relying on an
+    # incidental real failure (no API key / no `openai` package) to trigger the
+    # fallback path.
+    monkeypatch.setattr("shortform_lab.llm_orchestrator.AgenticOrchestrator._run", boom)
     error_path = tmp_path / "planner_error.txt"
     plan = plan_edits(
         _transcript(), style, source_video="source.mp4", use_llm=True, error_path=error_path

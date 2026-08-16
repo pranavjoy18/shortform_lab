@@ -12,6 +12,7 @@ captions:
   font_size: 64
   max_chars_per_line: 28
   position: bottom
+  font_family: "Poppins ExtraBold"
 visuals:
   punch_in_count: 2
   text_card_count: 2

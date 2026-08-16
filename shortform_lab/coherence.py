@@ -156,7 +156,29 @@ def _check_hook(tl: Timeline, out_ms: int) -> list[Violation]:
         v.append(Violation("hook", f"start {tl.hook.start_ms} > end {tl.hook.end_ms}"))
     if tl.hook.end_ms > out_ms:
         v.append(Violation("hook", f"ends at {tl.hook.end_ms}ms past output {out_ms}ms", "warning"))
+
+    # A hook that just repeats the caption playing under it wastes the slot — it
+    # should tease, not duplicate. Compare word-normalized text against every
+    # caption cue overlapping the hook's time window.
+    hook_words = _normalize_words(tl.hook.text)
+    if hook_words:
+        for cue in tl.captions:
+            overlaps = cue.start_ms < tl.hook.end_ms and cue.end_ms > tl.hook.start_ms
+            if not overlaps:
+                continue
+            cue_words = _normalize_words(cue.text)
+            if hook_words == cue_words or (cue_words[: len(hook_words)] == hook_words):
+                v.append(Violation(
+                    "hook",
+                    f"text duplicates the caption playing under it ({tl.hook.text!r} vs {cue.text!r})",
+                    "warning",
+                ))
+                break
     return v
+
+
+def _normalize_words(text: str) -> list[str]:
+    return [w.strip(".,;:!?").lower() for w in text.split()]
 
 
 def _check_overlays(tl: Timeline, out_ms: int) -> list[Violation]:

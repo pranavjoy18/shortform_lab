@@ -244,6 +244,7 @@ class AgenticOrchestrator:
             toolbox=json.dumps(toolbox_catalog(), indent=2),
             style_name=style.name,
             caption_mode=style.captions.mode,
+            word_animation=style.captions.word_animation,
         )
 
         # ----------------------------------------------------------------- #

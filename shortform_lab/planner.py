@@ -46,9 +46,13 @@ class DeterministicPlanner:
     tightening happened in ``plan_edits``; the orchestrator owns it there now.
     """
 
-    def plan(self, transcript: Transcript, style: StyleConfig, *, source_video: str) -> EditPlan:
+    def plan(
+        self, transcript: Transcript, style: StyleConfig, *, source_video: str, debug: bool = False
+    ) -> EditPlan:
         source = _spine_source(source_video, transcript.duration_ms, transcript)
-        tl = DeterministicOrchestrator().plan_timeline(transcript, style, source, tighten=False)
+        tl = DeterministicOrchestrator().plan_timeline(
+            transcript, style, source, tighten=False, debug=debug
+        )
         return timeline_to_editplan(tl)
 
 
@@ -62,6 +66,7 @@ def plan_timeline(
     model: str = "gpt-4o-mini",
     error_path: Path | None = None,
     source_duration_ms: int | None = None,
+    debug: bool = False,
 ) -> Timeline:
     """Build a coherence-validated ``Timeline`` via the deterministic or LLM orchestrator.
 
@@ -72,6 +77,10 @@ def plan_timeline(
     ``use_llm=False`` → ``DeterministicOrchestrator`` (no API calls).
 
     All LLM paths fall back to the deterministic orchestrator on any failure.
+    ``debug`` only affects the deterministic path: it unlocks that path's hook
+    (see ``presets.py``), which is otherwise never rendered — it's purely
+    extractive and not real hook copy. The generative path always writes real
+    hook copy when it chooses to add one, independent of ``debug``.
     """
     source = _spine_source(source_video, source_duration_ms, transcript)
     if use_llm:
@@ -80,7 +89,9 @@ def plan_timeline(
             interactive=interactive,
             error_path=error_path,
         )
-    return DeterministicOrchestrator().plan_timeline(transcript, style, source, tighten=True)
+    return DeterministicOrchestrator().plan_timeline(
+        transcript, style, source, tighten=True, debug=debug
+    )
 
 
 def plan_edits(
@@ -93,6 +104,7 @@ def plan_edits(
     model: str = "gpt-4o-mini",
     error_path: Path | None = None,
     source_duration_ms: int | None = None,
+    debug: bool = False,
 ) -> EditPlan:
     """Plan edits and adapt the resulting Timeline to an ``EditPlan`` (back-compat)."""
     return timeline_to_editplan(
@@ -105,5 +117,6 @@ def plan_edits(
             model=model,
             error_path=error_path,
             source_duration_ms=source_duration_ms,
+            debug=debug,
         )
     )

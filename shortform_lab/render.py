@@ -12,6 +12,7 @@ remain in ``edit_plan.json`` for inspection and future use.
 
 from __future__ import annotations
 
+import os
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,9 +20,17 @@ from pathlib import Path
 from .models import CaptionCue, CaptionSettings, ColorGrade, EditPlan, GradeSpan, StyleConfig
 from .timeline import Timeline
 
-# Fallback font when style doesn't specify one. libass substitutes system default
-# when the requested family is not installed, so this is a safe baseline.
-DEFAULT_FONT = "FreeSans"
+# Bundled caption fonts (assets/fonts/, a sibling of configs/) — real family
+# names embedded in each file's name table, verified via its TrueType 'name'
+# table (nameID 1). Passed to FFmpeg's ``subtitles`` filter as ``fontsdir`` so
+# libass finds them without any system font install, keeping renders identical
+# across machines. All OFL-licensed (license text bundled alongside).
+FONTS_DIR = Path(__file__).resolve().parent.parent / "assets" / "fonts"
+
+# Fallback font when a style doesn't specify one — a real bundled weight
+# (not a synthetic bold), so captions look like a picked typeface, not a
+# generic system default.
+DEFAULT_FONT = "Poppins ExtraBold"
 
 # ASS alignment uses numpad positions: 2=bottom-center, 5=middle-center, 8=top-center,
 # 1=bottom-left (used for lower-third placement).
@@ -57,7 +66,6 @@ def write_captions_ass(
     lt_sub_size = int(round(cap_size * 0.60))
     margin_v = max(80, h // 12)
     accent = _hex_to_ass(style.captions.highlight_color)
-    hook_text_color = _text_on_accent(style.captions.highlight_color)
 
     cap_align_eff = cap_align
     cap_margin_v = margin_v
@@ -86,11 +94,11 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Caption,{font},{cap_size},&H00FFFFFF,&H00000000,&H64000000,1,1,3,1,{cap_align_eff},60,60,{cap_margin_v},1
-Style: Hook,{font},{hook_size},{hook_text_color},{accent},&H64000000,1,3,8,3,8,80,80,{hook_margin_v},1
-Style: Card,{font},{card_size},&H00FFFFFF,&H00000000,&HAA000000,1,3,2,0,5,80,80,0,1
-Style: WordBig,{font},{word_big_size},{accent},&H00000000,&HAA000000,1,3,3,1,5,80,80,0,1
-Style: LowerThird,{font},{lt_size},&H00FFFFFF,&H00000000,&HBB000000,1,1,2,1,1,60,60,{lt_margin_v},1
+Style: Caption,{font},{cap_size},&H00FFFFFF,&H00000000,&H64000000,0,1,2,1,{cap_align_eff},60,60,{cap_margin_v},1
+Style: Hook,{font},{hook_size},&H00FFFFFF,&H00000000,&H64000000,0,1,2,1,8,80,80,{hook_margin_v},1
+Style: Card,{font},{card_size},&H00FFFFFF,&H00000000,&HAA000000,0,3,2,0,5,80,80,0,1
+Style: WordBig,{font},{word_big_size},{accent},&H00000000,&HAA000000,0,3,3,1,5,80,80,0,1
+Style: LowerThird,{font},{lt_size},&H00FFFFFF,&H00000000,&HBB000000,0,1,2,1,1,60,60,{lt_margin_v},1
 Style: LowerThirdSub,{font},{lt_sub_size},&HCCFFFFFF,&H00000000,&HBB000000,0,1,1,0,1,60,60,{lt_margin_v + lt_size + 8},1
 
 [Events]
@@ -166,6 +174,7 @@ def build_video_filter(
     *,
     color: ColorGrade | None = None,
     grade_spans: list[GradeSpan] | None = None,
+    fontsdir: str | None = None,
 ) -> str:
     """Build the ``-vf`` chain: color grade, layout stage, optional punch-in, burn-in.
 
@@ -227,7 +236,12 @@ def build_video_filter(
         )
         parts.append(f"scale={w}:{h}")
 
-    parts.append(f"subtitles={captions_filename}")
+    sub = f"subtitles={captions_filename}"
+    if fontsdir is not None:
+        # Points libass at the bundled fonts (assets/fonts/) so caption fonts
+        # resolve identically on every machine, with no system font install.
+        sub += f":fontsdir={fontsdir}"
+    parts.append(sub)
     parts.append("format=yuv420p")
     return ",".join(parts)
 
@@ -350,7 +364,11 @@ def render_video(
 
     color = timeline.color if timeline is not None else None
     grade_spans = timeline.grade_spans if timeline is not None else []
-    vf = build_video_filter(plan, captions_path.name, color=color, grade_spans=grade_spans)
+    # Relative path (not absolute) for the same reason as the bare captions
+    # filename: keeps the filtergraph argument free of characters (":" on
+    # Windows drive letters) that collide with FFmpeg's filter-option syntax.
+    fontsdir = os.path.relpath(FONTS_DIR, work_dir).replace(os.sep, "/")
+    vf = build_video_filter(plan, captions_path.name, color=color, grade_spans=grade_spans, fontsdir=fontsdir)
 
     cmd = [
         "ffmpeg", "-y",
@@ -501,16 +519,6 @@ def _hex_to_ass(hex_color: str) -> str:
     return f"&H00{b}{g}{r}".upper()
 
 
-def _text_on_accent(hex_color: str) -> str:
-    """Pick a readable ASS text colour (black or white) for text on the accent box."""
-    h = hex_color.lstrip("#")
-    if len(h) != 6:
-        return "&H00000000"
-    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-    luminance = 0.299 * r + 0.587 * g + 0.114 * b
-    return "&H00000000" if luminance > 140 else "&H00FFFFFF"
-
-
 def _clean_word(text: str, *, uppercase: bool) -> str:
     """Strip, optionally upper-case, and neutralise braces in one word's text."""
     t = text.strip()
@@ -543,7 +551,14 @@ def _word_events(
 
 
 def _active_word_events(cue: CaptionCue, *, base: str, accent: str, uppercase: bool) -> list[str]:
-    """Keep the whole group on screen, recolouring the current word per event."""
+    """Keep the whole group on screen, recolouring the current word per event.
+
+    Only recolours a word during its own span if that word is flagged
+    ``emphasize`` (generative-path-only, cosmetic — see ``skills/caption.py``).
+    An unflagged word never gets the accent, so a cue with no emphasized words
+    renders as identical plain-text events throughout — no highlight cycling
+    through words just because they happen to be the one being spoken.
+    """
     words = cue.words
     events: list[str] = []
     for i, w in enumerate(words):
@@ -554,7 +569,7 @@ def _active_word_events(cue: CaptionCue, *, base: str, accent: str, uppercase: b
         parts = []
         for j, ww in enumerate(words):
             tok = _clean_word(ww.text, uppercase=uppercase)
-            parts.append(f"{{\\c{accent}}}{tok}{{\\c{base}}}" if j == i else tok)
+            parts.append(f"{{\\c{accent}}}{tok}{{\\c{base}}}" if j == i and w.emphasize else tok)
         events.append(_dialogue("Caption", start, end, " ".join(parts)))
     return events
 

@@ -91,6 +91,7 @@ class DeterministicOrchestrator:
         source: MediaRef,
         *,
         tighten: bool = True,
+        debug: bool = False,
     ) -> Timeline:
-        preset = preset_from_style(style, tighten=tighten)
+        preset = preset_from_style(style, tighten=tighten, debug=debug)
         return compose_timeline(preset.skills, transcript, style, source)

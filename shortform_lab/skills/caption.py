@@ -16,13 +16,22 @@ from ..timeline import Timeline
 from .base import Context
 
 
-def build_captions(transcript: Transcript, style: StyleConfig) -> list[CaptionCue]:
+def build_captions(
+    transcript: Transcript, style: StyleConfig, *, emphasize: tuple[str, ...] = ()
+) -> list[CaptionCue]:
     """Turn a transcript into caption cues according to the style's caption mode.
 
     Sentence mode yields one cue per segment with no word timings. Word mode
     yields short word *groups*, each cue carrying the per-word timings the
     renderer animates. When a segment lacks word timings (e.g. a segment-only
     transcript), even-spaced timings are synthesized so the word look still works.
+
+    ``emphasize`` (the generative path only — the deterministic default is empty,
+    meaning no word gets the accent-highlight treatment) marks specific words or
+    short phrases from the transcript as ``WordTiming.emphasize=True``, which
+    ``active_word`` rendering uses to decide which word (if any) to accent-color.
+    It never changes caption text or timing — words always come from the
+    transcript; this only flags a subset of the already-correct words.
     """
     if style.captions.mode == "sentence":
         return [
@@ -33,9 +42,12 @@ def build_captions(transcript: Transcript, style: StyleConfig) -> list[CaptionCu
     group_size = (
         1 if style.captions.word_animation == "one_word" else style.captions.max_words_per_group
     )
+    phrases = _normalize_phrases(emphasize)
     cues: list[CaptionCue] = []
     for seg in transcript.segments:
         words = seg.words or _synthesize_words(seg)
+        if phrases:
+            words = _mark_emphasis(words, phrases)
         for group in _chunk(words, group_size):
             cues.append(
                 CaptionCue(
@@ -46,6 +58,35 @@ def build_captions(transcript: Transcript, style: StyleConfig) -> list[CaptionCu
                 )
             )
     return cues
+
+
+def _norm_token(text: str) -> str:
+    return text.strip().strip(".,;:!?\"'").lower()
+
+
+def _normalize_phrases(emphasize: tuple[str, ...]) -> list[list[str]]:
+    phrases = [[_norm_token(t) for t in phrase.split()] for phrase in emphasize]
+    return [p for p in phrases if p and all(p)]
+
+
+def _mark_emphasis(words: list[WordTiming], phrases: list[list[str]]) -> list[WordTiming]:
+    """Flag words matching any phrase (case-insensitive, punctuation-tolerant).
+
+    Matches consecutive words against each phrase's tokens; a phrase that never
+    matches (e.g. the LLM misquoted the transcript) is silently ignored rather
+    than raising — emphasis is cosmetic, never load-bearing.
+    """
+    norm = [_norm_token(w.text) for w in words]
+    hit = [False] * len(words)
+    for phrase in phrases:
+        n = len(phrase)
+        for i in range(len(words) - n + 1):
+            if norm[i : i + n] == phrase:
+                for k in range(i, i + n):
+                    hit[k] = True
+    if not any(hit):
+        return words
+    return [w.model_copy(update={"emphasize": True}) if h else w for w, h in zip(words, hit)]
 
 
 def _synthesize_words(seg: TranscriptSegment) -> list[WordTiming]:
@@ -71,6 +112,8 @@ def _chunk(items: list, size: int) -> list[list]:
 class CaptionSkill:
     """Build caption cues from the (output-time) transcript per the style."""
 
+    emphasize: tuple[str, ...] = ()
+
     name: ClassVar[str] = "add_captions"
     # Reads the spine too: caption cues are in output time, which depends on the
     # cut list — so this must run after any skill that rewrites the spine.
@@ -78,4 +121,6 @@ class CaptionSkill:
     writes: ClassVar[frozenset[str]] = frozenset({"captions"})
 
     def apply(self, tl: Timeline, ctx: Context, *, span: TimeRange | None = None) -> Timeline:
-        return tl.model_copy(update={"captions": build_captions(ctx.transcript, ctx.style)})
+        return tl.model_copy(update={
+            "captions": build_captions(ctx.transcript, ctx.style, emphasize=self.emphasize)
+        })

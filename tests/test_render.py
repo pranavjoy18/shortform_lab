@@ -158,15 +158,32 @@ def test_letterbox_anchors_captions_just_below_video(tmp_path: Path):
     assert margin_v == band_bottom - cap_size // 3
 
 
-def test_active_word_emits_per_word_highlight_events(tmp_path: Path):
+def test_active_word_no_emphasis_renders_plain_events(tmp_path: Path):
+    # Deterministic default: no WordTiming is emphasize=True, so no word ever
+    # gets the accent — mechanically cycling the highlight through every word
+    # regardless of content is exactly what was removed.
     style = load_style_config("word_pop")  # active_word, uppercase
     content = write_captions_ass(_word_plan(), style, tmp_path / "c.ass").read_text()
-    # One Dialogue per word, each recolouring the active word with the accent.
     dialogues = [ln for ln in content.splitlines() if ln.startswith("Dialogue:")]
     word_events = [ln for ln in dialogues if "\\c&H" in ln]
-    assert len(word_events) == 3            # three words -> three events
-    assert "&H0000E0FF" in content          # #FFE000 -> ASS accent colour
-    assert "MOST" in content                # uppercase applied
+    assert len(dialogues) >= 3               # still one event per word (timing)
+    assert word_events == []                 # but none of them recolour anything
+    assert "MOST" in content                 # uppercase still applied
+
+
+def test_active_word_emphasized_word_gets_highlight_event(tmp_path: Path):
+    style = load_style_config("word_pop")  # active_word, uppercase
+    plan = _word_plan()
+    words = plan.captions[0].words
+    words[1] = words[1].model_copy(update={"emphasize": True})  # "people"
+    plan.captions[0].words = words
+
+    content = write_captions_ass(plan, style, tmp_path / "c.ass").read_text()
+    dialogues = [ln for ln in content.splitlines() if ln.startswith("Dialogue:")]
+    word_events = [ln for ln in dialogues if "\\c&H" in ln]
+    assert len(word_events) == 1             # only the flagged word's own span
+    assert "&H0000E0FF" in word_events[0]    # #FFE000 -> ASS accent colour
+    assert "PEOPLE" in word_events[0]         # uppercase applied
 
 
 def test_karaoke_emits_kf_sweep(tmp_path: Path):

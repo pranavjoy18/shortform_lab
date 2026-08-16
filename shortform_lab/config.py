@@ -45,3 +45,28 @@ def load_style_config(style_name: str, styles_dir: Path | None = None) -> StyleC
         raise ValueError(f"Style config {path} must be a YAML mapping, got {type(raw).__name__}")
 
     return StyleConfig.model_validate(raw)
+
+
+def style_explicitly_sets_layout(style_name: str, styles_dir: Path | None = None) -> bool:
+    """Return whether ``style_name``'s YAML actually sets ``export.layout``.
+
+    ``load_style_config`` always returns a concrete ``export.layout`` (Pydantic
+    defaults to ``"fill"`` when the YAML omits it), so callers that need to
+    distinguish "the style deliberately chose a layout" from "it never
+    mentioned layout at all" (e.g. to decide whether auto-detection from the
+    source resolution is allowed to apply) re-read the raw YAML here instead.
+    """
+    directory = styles_dir or STYLES_DIR
+    path = directory / f"{style_name}.yaml"
+    if not path.is_file():
+        known = ", ".join(available_styles(directory)) or "(none found)"
+        raise FileNotFoundError(
+            f"Style '{style_name}' not found at {path}. Available styles: {known}"
+        )
+
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"Style config {path} must be a YAML mapping, got {type(raw).__name__}")
+
+    export = raw.get("export")
+    return isinstance(export, dict) and "layout" in export

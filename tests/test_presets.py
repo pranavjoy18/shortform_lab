@@ -70,12 +70,21 @@ def test_preset_gates_disabled_features():
     assert "punch_in" in names
 
 
+def test_preset_hook_enabled_without_debug_is_still_omitted():
+    # The deterministic hook is purely extractive (never real hook copy), so
+    # style.hook.enabled alone isn't enough — it only renders under --debug.
+    style = load_style_config("bold_creator")
+    style.hook.enabled = True
+    names = {s.name for s in preset_from_style(style).skills}
+    assert "hook" not in names
+
+
 def test_preset_includes_enabled_features():
     style = load_style_config("bold_creator")
     style.hook.enabled = True
     style.visuals.overlays_enabled = True
     style.tighten.enabled = True
-    names = {s.name for s in preset_from_style(style).skills}
+    names = {s.name for s in preset_from_style(style, debug=True).skills}
     assert {"tighten_silence", "hook", "add_captions", "overlay", "punch_in"} <= names
 
 
@@ -90,7 +99,7 @@ def test_preset_orders_topologically_with_tighten_leading():
     style = load_style_config("word_pop")
     style.tighten.enabled = True
     style.hook.enabled = True
-    ordered = topological_order(preset_from_style(style).skills)
+    ordered = topological_order(preset_from_style(style, debug=True).skills)
     names = [s.name for s in ordered]
     assert names[0] == "tighten_silence"
     # segment_beats reads spine so it follows tighten; decoration skills follow beats.

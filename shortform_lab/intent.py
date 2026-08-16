@@ -32,6 +32,7 @@ STYLE_DESCRIPTIONS: dict[str, str] = {
     "karaoke":         "Color sweeps across the line as each word is spoken",
     "one_word":        "One large word at a time, centered — maximum visual punch",
     "reels_letterbox": "Letterbox layout with word captions — cinematic black-bars look",
+    "viral_creator":   "High-energy word captions with vivid color grade and fast cuts",
 }
 
 LOOK_DESCRIPTIONS: dict[str, str] = {

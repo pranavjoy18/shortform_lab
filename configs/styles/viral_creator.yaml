@@ -17,7 +17,7 @@ captions:
   highlight_color: "#FF3B30"
   max_words_per_group: 3
   uppercase: true
-  font_family: "Impact"
+  font_family: "Anton"
   animation_in: fly_up
 visuals:
   punch_in_count: 2

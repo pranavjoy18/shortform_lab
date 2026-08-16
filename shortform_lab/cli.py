@@ -16,11 +16,12 @@ import shutil
 import uuid
 from datetime import date
 from pathlib import Path
+from typing import Literal
 
 import typer
 from dotenv import load_dotenv
 
-from .config import available_styles, load_style_config
+from .config import available_styles, load_style_config, style_explicitly_sets_layout
 from .ffmpeg_tools import ensure_ffmpeg_available, extract_audio, probe_video
 from .models import Transcript
 from .planner import plan_timeline
@@ -51,12 +52,17 @@ def process(
     transcript: Path | None = typer.Option(None, "--transcript", "-t", help="Existing transcript JSON (skips transcription)."),
     use_llm: bool = typer.Option(False, "--use-llm", help="Use the agentic edit planner (falls back deterministically)."),
     interactive: bool = typer.Option(False, "--interactive", "-i", help="Before planning, ask creative-intent questions in the terminal (implies --use-llm)."),
+    debug: bool = typer.Option(False, "--debug", help="Testing only: allow the deterministic planner's hook (purely extractive, never real hook copy — see plan_timeline's docstring). Has no effect on --use-llm, which writes real hook copy on its own."),
     output_dir: Path | None = typer.Option(None, "--output-dir", help="Override the auto-generated run folder."),
 ) -> None:
     """Process one clip into a polished vertical short."""
     load_dotenv()
     ensure_ffmpeg_available()
 
+    # Tracks whether the layout was pinned by an explicit user choice (CLI flag
+    # or interactive interview answer), so the post-probe auto-detect step below
+    # knows not to override it.
+    layout_explicit = False
     if interactive:
         # Setup interview: let the user pick style, layout, color, caps, tighten.
         # Explicit CLI flags still override the interview choices (applied below).
@@ -64,18 +70,22 @@ def process(
         choices = SetupInterview().run(available_styles=available_styles())
         cfg = load_style_config(choices.style_name)
         cfg.export.layout = choices.layout
+        layout_explicit = True
         cfg.tighten.enabled = choices.tighten
         cfg.captions.uppercase = choices.uppercase
         if choices.color_look is not None:
             cfg.color.look = choices.color_look
+        resolved_style_name = choices.style_name
     else:
         cfg = load_style_config(style)
+        resolved_style_name = style
 
     # Explicit CLI flags take precedence over both defaults and interview choices.
     if layout is not None:
         if layout not in ("fill", "letterbox"):
             raise typer.BadParameter("--layout must be 'fill' or 'letterbox'.")
         cfg.export.layout = layout
+        layout_explicit = True
     if tighten is not None:
         cfg.tighten.enabled = tighten
     if color is not None:
@@ -93,6 +103,11 @@ def process(
 
     # 2. Probe + extract audio.
     info = probe_video(source_copy)
+    # No explicit layout choice (CLI flag / interactive answer) and the style
+    # itself doesn't pin one: default the layout from the source's own
+    # resolution instead of always falling back to ExportSettings' "fill".
+    if not layout_explicit and not style_explicitly_sets_layout(resolved_style_name):
+        cfg.export.layout = _auto_layout(info.width, info.height)
     typer.echo(f"→ Probed: {info.width}x{info.height}, {info.duration_ms/1000:.1f}s, "
                f"audio={info.has_audio}, layout={cfg.export.layout}")
     audio_path = run_dir / "audio.wav"
@@ -117,6 +132,7 @@ def process(
         interactive=interactive,
         error_path=error_path,
         source_duration_ms=info.duration_ms,
+        debug=debug,
     )
     llm_failed = use_llm and error_path.is_file()
     plan = timeline_to_editplan(timeline)
@@ -163,6 +179,13 @@ def _resolve_transcript(
         )
     typer.echo("→ No transcript provided; transcribing with OpenAI Whisper...")
     return OpenAITranscriber(normalize=False).transcribe(source, work_dir=run_dir)
+
+
+def _auto_layout(width: int, height: int) -> Literal["fill", "letterbox"]:
+    """Default layout from source resolution when neither the user nor the
+    style picked one: already-portrait/square sources crop fine (``fill``);
+    landscape sources lose too much width cropped, so pad instead (``letterbox``)."""
+    return "fill" if height >= width else "letterbox"
 
 
 def _run_slug(input_video: Path) -> str:

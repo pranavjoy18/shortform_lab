@@ -16,6 +16,7 @@ captions:
   font_size: 72
   max_chars_per_line: 16
   position: center
+  font_family: "Anton"
 visuals:
   punch_in_count: 1
   text_card_count: 0

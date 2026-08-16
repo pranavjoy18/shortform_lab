@@ -31,8 +31,11 @@ def test_orchestrator_builds_timeline_and_adapts_to_editplan():
     style.visuals.overlays_enabled = True
     t = _transcript()
 
+    # debug=True: the deterministic hook is purely extractive and only renders
+    # under --debug (real hook copy comes from the generative path); exercising
+    # it here specifically to test that gate + the EditPlan adapter.
     tl = DeterministicOrchestrator().plan_timeline(
-        t, style, _source(t.duration_ms), tighten=False
+        t, style, _source(t.duration_ms), tighten=False, debug=True
     )
 
     assert tl.hook is not None
