@@ -49,8 +49,32 @@ cat /tmp/smoke_out/edit_plan.json   # keep_ranges (source-time), captions, expor
 cat /tmp/smoke_out/review.md        # human summary incl. tightening
 ```
 
-Knobs to compose: `--style {bold_creator,clean_captions,word_pop,karaoke,one_word,reels_letterbox}`,
+Knobs to compose: `--style {bold_creator,clean_captions,word_pop,karaoke,one_word,reels_letterbox,viral_creator}`,
 `--layout {fill,letterbox}`, `--tighten/--no-tighten`, `--color {vivid,punchy,cinematic,soft,bright,mono}`. Notes:
+- **`--style` has no hardcoded default any more.** Omit it and `cli.py`'s
+  `_prompt_style_choice` asks interactively: a numbered list of `available_styles()`
+  each with its one-line `STYLE_DESCRIPTIONS` (`intent.py`), plus a final "Surprise
+  me" entry that picks `random.choice(available)`. This exists so `--use-llm` never
+  silently inherits an arbitrary style the user never chose — the LLM only ever picks
+  *skills/params inside* an already-resolved style's toolbox (fonts/animations/layout
+  all come from the style, not the model), so there was no principled basis for it to
+  guess a style either; a human (or the random pick) has to name one. `--interactive`'s
+  full `SetupInterview` already asks this same style question (plus layout/tighten/caps),
+  so `_prompt_style_choice` never runs there — and (pre-existing behavior, unchanged)
+  `--interactive` always re-asks via the interview even if `--style` was also passed,
+  since the interview's answer is what gets used. Outside `--interactive`, passing
+  `--style` skips the new prompt entirely. Verify:
+  ```bash
+  uv run python -c "
+  from typer.testing import CliRunner
+  from shortform_lab import cli
+  r = CliRunner().invoke(cli.app, ['process', '/tmp/smoke.mp4', '--transcript',
+      'tests/fixtures/transcript_sample.json', '--output-dir', '/tmp/prompt_out'],
+      input='surprise me\n')
+  print(r.output)"
+  ```
+  should print the numbered list + descriptions, echo which style the surprise pick
+  landed on, then proceed exactly as if that style had been passed via `--style`.
 - **Tightening needs gaps to do anything**: the bundled `transcript_sample.json`
   is contiguous, so `--tighten` is a no-op on it — pass a transcript with silent
   gaps between segments to see cuts (confirm `final.mp4` is shorter + `keep_ranges`).
@@ -63,6 +87,83 @@ Knobs to compose: `--style {bold_creator,clean_captions,word_pop,karaoke,one_wor
   `--transcript` (real Whisper word timestamps); the offline path synthesizes
   even-spaced word timings instead.
 - Letterbox + word styles: confirm captions sit on the video/bar seam.
+- **Letterbox cropping is flexible, not a hardcoded fit-the-whole-source /
+  half-and-half split.** `render._letterbox_scale` picks a scale anywhere
+  between "fit" (whole source, zero crop, can leave huge bars) and "fill"
+  (zero bars, can crop most of the frame away), targeting
+  `style.export.letterbox_min_content` (default `0.72` — about how much of a
+  9:16 frame a Reels-style UI leaves uncovered) as the video band's share of
+  the canvas height, capped so it never crops more than 40% of the scaled
+  frame's width away (`_LETTERBOX_MAX_WIDTH_CROP`) — an extreme aspect
+  mismatch (e.g. ultrawide) degrades to bigger bars rather than cropping the
+  subject out. It's resolution-independent (driven by aspect ratio, not
+  absolute pixel size) and only trades crop for bars when the source is wider
+  than the canvas (a source already taller than 9:16 falls back to plain fit —
+  nothing to trade). `render_video` always knows the source size for
+  letterbox (it probes it), so this is always live in real runs;
+  `build_video_filter` only falls back to the old fit-and-pad when called
+  without `source_size` (unit tests). Verify:
+  ```bash
+  ffmpeg -y -f lavfi -i "testsrc=size=1280x720:rate=30:duration=6" \
+         -f lavfi -i "sine=frequency=220:duration=6" -shortest -pix_fmt yuv420p /tmp/wide_lb.mp4
+  uv run python -m shortform_lab.cli process /tmp/wide_lb.mp4 --style reels_letterbox \
+    --transcript tests/fixtures/transcript_sample.json --output-dir /tmp/wide_lb_out
+  ffmpeg -y -ss 0.5 -i /tmp/wide_lb_out/final.mp4 -frames:v 1 /tmp/wide_lb_frame.png
+  ```
+  Eyeball `/tmp/wide_lb_frame.png`: the video band should visibly cover more
+  than half the frame height (not the old ~32%-band/68%-bars split a plain fit
+  gives a 16:9 source), with the sides cropped in rather than the whole frame
+  shrunk down. Raise/lower `letterbox_min_content` in a style's `export:`
+  block to make bars smaller/larger; `edit_plan.json`'s `export_layout` stays
+  `"letterbox"` either way — only the FFmpeg-side crop amount changes.
+- **Letterbox font size scales with how much the crop shows.** When
+  `_letterbox_scale` picks a scale above plain `fit_scale` (less bar, more of
+  the source visible — see above), the subject reads larger on screen too, so
+  a fixed caption `font_size` would look proportionally smaller. `write_captions_ass`
+  scales `cap_size` (and everything derived from it — hook/card/word/lower-third
+  sizes and their contrast-box padding, see below) by `actual_scale / fit_scale`,
+  so a source that crops in a lot gets proportionally bigger captions, and a
+  source that needed no crop (already close to 9:16) is unaffected (`ratio == 1.0`).
+  Verify: `grep 'Style: Caption,' /tmp/wide_lb_out/captions.ass` — the `Fontsize`
+  field (3rd) should read well above the style's configured `font_size` (e.g.
+  `reels_letterbox`'s `56` renders as `93` for the 16:9 `/tmp/wide_lb.mp4` fixture
+  above, since that source hits the ~1.67x crop-safety-cap ratio); a near-9:16
+  source should render at (or very near) the configured size unchanged.
+- **Caption/hook/card text gets a translucent dark contrast box behind it**
+  (`BorderStyle=3` in the ASS style, not just an outline), sized to the text's
+  own line rather than a full-width banner. On the black letterbox bar it's
+  visually indistinguishable from the bar (no visible box); over bright/light
+  video content it guarantees a dark backing so white text never blends in —
+  no per-frame background analysis needed, applies uniformly to every style
+  since it lives in `write_captions_ass`, not per-style YAML. Padding scales
+  with each element's own font size (`cap_pad`/`hook_pad`/`word_big_pad`).
+  Verify: render `word_pop` or `bold_creator` over a bright/white background
+  clip and eyeball a frame — captions should sit on a visible dark box rather
+  than blending into the background:
+  ```bash
+  ffmpeg -y -f lavfi -i "color=c=white:size=1080x1920:rate=30:duration=6" \
+         -f lavfi -i "sine=frequency=220:duration=6" -shortest -pix_fmt yuv420p /tmp/white_bg.mp4
+  uv run python -m shortform_lab.cli process /tmp/white_bg.mp4 --style bold_creator \
+    --transcript tests/fixtures/transcript_sample.json --output-dir /tmp/white_bg_out
+  ffmpeg -y -ss 0.5 -i /tmp/white_bg_out/final.mp4 -frames:v 1 /tmp/white_bg_frame.png
+  ```
+- **`captions.uppercase` now actually applies to sentence-mode captions, the
+  hook, and overlay cards** (previously only word-mode paths — `active_word`/
+  `karaoke`/`one_word` — respected it; sentence-mode `Caption`/`Hook`/`Card`
+  events silently ignored the flag). Verify: a style with `uppercase: true` and
+  `captions.mode: sentence` should render its hook/caption/card text upper-cased
+  in `captions.ass`.
+- **`bold_creator` now ships uppercase + a fade-in + a `punchy` color grade**
+  (`configs/styles/bold_creator.yaml`) instead of flat, static, ungraded
+  sentence captions — the "looks really ass" default. Still sentence-mode
+  captions with hook/overlays/tighten off by default (deliberately unchanged —
+  several tests, e.g. `test_preset_gates_disabled_features`, rely on
+  `bold_creator` being the canonical "gated features off" fixture, so don't
+  flip those flags in this style without updating those tests). Verify:
+  `uv run python -m shortform_lab.cli process /tmp/smoke.mp4 --style bold_creator --transcript tests/fixtures/transcript_sample.json --output-dir /tmp/bold_creator_out`
+  → `edit_plan.json`'s echo line should show `color=punchy`, and
+  `captions.ass` should show `Style: Caption` uppercase text and
+  `{\fad(200,100)}` prefixes on caption events.
 - **Layout auto-detects from source resolution when neither `--layout` nor the
   style YAML pins one**: portrait/square sources (`height >= width`) default to
   `fill`, landscape sources default to `letterbox` (`cli.py`'s `_auto_layout`,
@@ -198,7 +299,7 @@ Two design decisions drive everything and should be preserved when extending the
 - `toolbox.py` — the LLM's function-calling surface (milestone 4): each skill paired with a strict Pydantic params schema (`TightenParams`/`HookParams`/…) + a description. `SkillPlan`/`SkillChoice` is the LLM's structured output (which skills + what params — **never timestamps or export settings, with two deliberate exceptions**: `HookParams.text` is real hook copy the Planner writes itself, and `CaptionParams.emphasize` is a list of words/phrases (verbatim transcript substrings) it may flag for accent-highlight — see `workers.py`'s `_PLANNER_INSTRUCTIONS`, which tells it to tease rather than restate the transcript for the hook, and to leave `emphasize` empty far more often than not (mechanically highlighting every word is exactly the bug this replaced); `build_skill`/`skills_from_plan` validate it and build skills; `toolbox_catalog` describes it for the prompt. The deterministic analogue is `presets.py`.
 - `llm_orchestrator.py` — `LLMOrchestrator.plan_timeline()`: asks an LLM (lazy `openai` import) to pick skills from the toolbox, validates the `SkillPlan`, composes it via the shared `compose_timeline`, and **falls back to `DeterministicOrchestrator` on any failure** (raw response → `planner_error.txt`). A single agent edits the whole clip; no subagents. Because the LLM only chooses skills/params, it cannot corrupt timings or export dims (a safety win over the old EditPlan-JSON approach).
 - `tighten.py` — pure (no-FFmpeg) silence/pause + **filler-word** compression: `compute_keep_ranges` (merges speech spans across short gaps, pads phrases, drops long gaps; with `remove_fillers=True` also carves out filler-word spans — `um`/`uh`/… from `DEFAULT_FILLER_WORDS` — needs word timings; returns `[]` when nothing to cut), `remap_ms` (source→output time, `None` in a cut), `tighten_transcript` (remaps onto the tightened timeline and **drops words cut out of the video** by positive-overlap test, so removed fillers also leave word-level captions; rebuilds a segment's text from survivors). All wrapped by the single spine-writing `TightenSilenceSkill`. Still future: retake/duplicate removal (more `keep_ranges`).
-- `render.py` — thin FFmpeg translation layer. All on-screen text (hook, captions, overlays) is written into a **single ASS subtitle file** (`captions.ass`) so the filtergraph stays small: optional **color grade** (`eq`, applied *first* so it never tints the captions burned in later, and so letterbox black bars added by `pad` stay pure black) → layout stage → optional time-gated punch-in zoom → `subtitles` burn-in. **Caption fonts are bundled, not system-dependent**: `FONTS_DIR` (`assets/fonts/`, OFL-licensed — Poppins ExtraBold, Anton, Bebas Neue) is passed to the `subtitles` filter as `fontsdir=` (a path relative to `work_dir`, same escaping rationale as the bare captions filename below), so libass resolves a style's `font_family` from the bundled `.ttf` first — renders are identical across machines regardless of what's installed system-wide. `DEFAULT_FONT`/`CaptionSettings.font_family` (`models.py`) both default to `"Poppins ExtraBold"`. Every ASS style line sets `Bold=0`: the bundled fonts are real weighted files (ExtraBold/the display faces' natural weight), so libass's synthetic-bold (`Bold=1`) is never invoked — it fake-embolds and looks worse than picking the right weight file. `render_video` takes an optional `timeline=` — the **first track read straight from the Timeline rather than the EditPlan** (the color grade): `build_video_filter(..., color=)` reads `timeline.color`. When `timeline` is `None` (or the grade is identity) the render is byte-identical to before. When `plan.keep_ranges` is set, `build_concat_filtergraph` builds a `-filter_complex` that `trim`/`atrim`s each kept span, `concat`s them, then runs the same vf chain on the result (loudnorm moves into the graph); empty `keep_ranges` keeps the plain `-vf` path. The layout stage is the only difference between layouts (`fill` = scale-increase + `crop`; `letterbox` = scale-decrease + `pad` black bars); both yield a full WxH canvas, so punch-in and burn-in code is shared. FFmpeg runs with cwd set to the run folder so the subtitle filter can use a bare filename (avoids filter-path escaping). **Only the first punch-in is rendered**; the rest stay in the plan for inspection. In letterbox, `render_video` probes the source to compute bar heights (`_letterbox_bars`); captions sit *on* the video/bar seam (slight overlap onto the video) while the hook — when present — stays fully inside the top bar. **The hook (`style.hook.enabled` + `--debug` — see `presets.py`) and overlay cards (`style.visuals.overlays_enabled`) are gated upstream (the orchestrator, and the LLM planner) and off by default**: when disabled they are simply absent from the plan (`plan.hook is None`, `plan.overlays == []`), and the renderer draws exactly what the plan holds. Re-enable per style with no code change. The `Hook` ASS style reuses `Caption`'s exact Bold/BorderStyle/Outline/Shadow/PrimaryColour/OutlineColour — same visual family as the body captions (just larger, top-positioned), not a separate boxed/accent-colored treatment. A caption cue carrying `words` animates per the style's `captions.word_animation` (`active_word` per-word highlight events — **but only recolours a word during its own span if `WordTiming.emphasize` is set**; an unflagged word (the deterministic default) never gets the accent, so a cue with no emphasized words renders as plain identical-looking events with zero highlight cycling — `karaoke` `\kf` sweep (unaffected by `emphasize`; it's a rhythm effect across all words, not a per-word importance call), `one_word` centered `WordBig`); a cue without `words` renders as one static line. Override tags (`\c`, `\kf`) are assembled around already-escaped word text so `_escape_ass` doesn't clobber them.
+- `render.py` — thin FFmpeg translation layer. All on-screen text (hook, captions, overlays) is written into a **single ASS subtitle file** (`captions.ass`) so the filtergraph stays small: optional **color grade** (`eq`, applied *first* so it never tints the captions burned in later, and so letterbox black bars added by `pad` stay pure black) → layout stage → optional time-gated punch-in zoom → `subtitles` burn-in. **Caption fonts are bundled, not system-dependent**: `FONTS_DIR` (`assets/fonts/`, OFL-licensed — Poppins ExtraBold, Anton, Bebas Neue) is passed to the `subtitles` filter as `fontsdir=` (a path relative to `work_dir`, same escaping rationale as the bare captions filename below), so libass resolves a style's `font_family` from the bundled `.ttf` first — renders are identical across machines regardless of what's installed system-wide. `DEFAULT_FONT`/`CaptionSettings.font_family` (`models.py`) both default to `"Poppins ExtraBold"`. Every ASS style line sets `Bold=0`: the bundled fonts are real weighted files (ExtraBold/the display faces' natural weight), so libass's synthetic-bold (`Bold=1`) is never invoked — it fake-embolds and looks worse than picking the right weight file. `render_video` takes an optional `timeline=` — the **first track read straight from the Timeline rather than the EditPlan** (the color grade): `build_video_filter(..., color=)` reads `timeline.color`. When `timeline` is `None` (or the grade is identity) the render is byte-identical to before. When `plan.keep_ranges` is set, `build_concat_filtergraph` builds a `-filter_complex` that `trim`/`atrim`s each kept span, `concat`s them, then runs the same vf chain on the result (loudnorm moves into the graph); empty `keep_ranges` keeps the plain `-vf` path. The layout stage is the only difference between layouts (`fill` = scale-increase + `crop`; `letterbox` = scale by `_letterbox_scale` + `pad` + `crop`, a flexible fit-to-fill blend — see the Smoke testing section); both yield a full WxH canvas, so punch-in and burn-in code is shared. FFmpeg runs with cwd set to the run folder so the subtitle filter can use a bare filename (avoids filter-path escaping). **Only the first punch-in is rendered**; the rest stay in the plan for inspection. In letterbox, `render_video` probes the source to compute bar heights (`_letterbox_bars`, sharing the same `_letterbox_scale` the filtergraph uses so captions always match the actual bars); captions sit *on* the video/bar seam (slight overlap onto the video) while the hook — when present — stays fully inside the top bar. **The hook (`style.hook.enabled` + `--debug` — see `presets.py`) and overlay cards (`style.visuals.overlays_enabled`) are gated upstream (the orchestrator, and the LLM planner) and off by default**: when disabled they are simply absent from the plan (`plan.hook is None`, `plan.overlays == []`), and the renderer draws exactly what the plan holds. Re-enable per style with no code change. The `Hook` ASS style reuses `Caption`'s exact Bold/BorderStyle/Outline/Shadow/PrimaryColour/OutlineColour — same visual family as the body captions (just larger, top-positioned), not a separate boxed/accent-colored treatment. A caption cue carrying `words` animates per the style's `captions.word_animation` (`active_word` per-word highlight events — **but only recolours a word during its own span if `WordTiming.emphasize` is set**; an unflagged word (the deterministic default) never gets the accent, so a cue with no emphasized words renders as plain identical-looking events with zero highlight cycling — `karaoke` `\kf` sweep (unaffected by `emphasize`; it's a rhythm effect across all words, not a per-word importance call), `one_word` centered `WordBig`); a cue without `words` renders as one static line. Override tags (`\c`, `\kf`) are assembled around already-escaped word text so `_escape_ass` doesn't clobber them.
 - `transcribe.py` — `Transcriber` protocol with `ProvidedTranscriptTranscriber` (reads JSON, zero cost) and `OpenAITranscriber` (lazy-imported, optional extra; requests word + segment granularity and buckets words into their segment). `load_transcript` tolerantly accepts both `{start_ms,end_ms}` and seconds-based `{start,end}` shapes, including an optional per-segment `words` array in either shape.
 - `ffmpeg_tools.py` — `subprocess.run` wrappers (always arg lists, never shell strings). `probe_video` returns the handful of facts the pipeline needs; raises `FFmpegError` early.
 - `models.py` — all data contracts. **Timestamps are integer milliseconds throughout** the system; do not introduce float-seconds in stored shapes.

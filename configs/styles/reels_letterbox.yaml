@@ -4,7 +4,8 @@ export:
   width: 1080
   height: 1920
   fps: 30
-  # Preserve the whole landscape, centered with black bars top/bottom.
+  # Centered with black bars top/bottom; a wide source is cropped some to
+  # keep the bars from ballooning (see letterbox_min_content, default 0.72).
   layout: letterbox
 hook:
   duration_ms: 2800

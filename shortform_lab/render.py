@@ -57,7 +57,25 @@ def write_captions_ass(
     """
     w, h = plan.export_width, plan.export_height
     font = style.captions.font_family or DEFAULT_FONT
-    cap_size = style.captions.font_size
+
+    # Letterbox: when the flexible crop (_letterbox_scale) shows more of the
+    # source than a plain "fit" would (less black bar, more visible video),
+    # the subject reads larger on screen too — scale caption sizes up to
+    # match, proportional to how much extra scale was applied over the fit
+    # baseline. At fit_scale itself (small band, big bars) this is 1.0, so
+    # nothing changes; every size below derives from cap_size, so hook/card/
+    # word/lower-third sizes (and their box padding) all scale with it too.
+    letterbox_font_scale = 1.0
+    if plan.export_layout == "letterbox" and source_size is not None:
+        src_w, src_h = source_size
+        fit_scale = min(w / src_w, h / src_h)
+        actual_scale = _letterbox_scale(
+            w, h, src_w, src_h, min_content_fraction=style.export.letterbox_min_content
+        )
+        if fit_scale > 0:
+            letterbox_font_scale = actual_scale / fit_scale
+
+    cap_size = max(1, round(style.captions.font_size * letterbox_font_scale))
     cap_align = _ALIGN[style.captions.position]
     hook_size = int(round(cap_size * 1.3))
     card_size = int(round(cap_size * 0.95))
@@ -67,11 +85,25 @@ def write_captions_ass(
     margin_v = max(80, h // 12)
     accent = _hex_to_ass(style.captions.highlight_color)
 
+    # Contrast hardening: a translucent dark box (BorderStyle=3) behind the
+    # text, sized instead of a bare outline. Against the black letterbox bar
+    # it's visually indistinguishable from the bar (no visible "box"); against
+    # bright/light video content (a white shirt, a wall) it gives white text a
+    # guaranteed-dark backing so it never blends in — no per-frame background
+    # analysis needed. Padding scales with each element's own font size so it
+    # reads the same across styles regardless of their configured sizes.
+    box_alpha = "&H4D000000"  # ~70% opaque black
+    cap_pad = max(8, round(cap_size * 0.16))
+    hook_pad = max(10, round(hook_size * 0.16))
+    word_big_pad = max(12, round(word_big_size * 0.16))
+
     cap_align_eff = cap_align
     cap_margin_v = margin_v
     hook_margin_v = margin_v
     if plan.export_layout == "letterbox" and source_size is not None:
-        top_bar, band_h, _bottom_bar = _letterbox_bars(w, h, *source_size)
+        top_bar, band_h, _bottom_bar = _letterbox_bars(
+            w, h, *source_size, min_content_fraction=style.export.letterbox_min_content
+        )
         band_bottom = top_bar + band_h
         overlap = cap_size // 3
         if cap_align == _ALIGN["bottom"]:
@@ -94,10 +126,10 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Caption,{font},{cap_size},&H00FFFFFF,&H00000000,&H64000000,0,1,2,1,{cap_align_eff},60,60,{cap_margin_v},1
-Style: Hook,{font},{hook_size},&H00FFFFFF,&H00000000,&H64000000,0,1,2,1,8,80,80,{hook_margin_v},1
+Style: Caption,{font},{cap_size},&H00FFFFFF,&H00000000,{box_alpha},0,3,{cap_pad},0,{cap_align_eff},60,60,{cap_margin_v},1
+Style: Hook,{font},{hook_size},&H00FFFFFF,&H00000000,{box_alpha},0,3,{hook_pad},0,8,80,80,{hook_margin_v},1
 Style: Card,{font},{card_size},&H00FFFFFF,&H00000000,&HAA000000,0,3,2,0,5,80,80,0,1
-Style: WordBig,{font},{word_big_size},{accent},&H00000000,&HAA000000,0,3,3,1,5,80,80,0,1
+Style: WordBig,{font},{word_big_size},{accent},&H00000000,{box_alpha},0,3,{word_big_pad},1,5,80,80,0,1
 Style: LowerThird,{font},{lt_size},&H00FFFFFF,&H00000000,&HBB000000,0,1,2,1,1,60,60,{lt_margin_v},1
 Style: LowerThirdSub,{font},{lt_sub_size},&HCCFFFFFF,&H00000000,&HBB000000,0,1,1,0,1,60,60,{lt_margin_v + lt_size + 8},1
 
@@ -110,10 +142,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     cap_anim = _animation_prefix(anim_in, w, h, cap_align_eff, cap_margin_v)
 
     lines: list[str] = []
+    upper = style.captions.uppercase
 
     if plan.hook is not None:
+        hook_text = plan.hook.text.upper() if upper else plan.hook.text
         lines.append(
-            _event("Hook", plan.hook.start_ms, plan.hook.end_ms, plan.hook.text,
+            _event("Hook", plan.hook.start_ms, plan.hook.end_ms, hook_text,
                    max_chars=style.captions.max_chars_per_line)
         )
 
@@ -121,8 +155,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if not overlay.text:
             continue
         align = _ALIGN.get(overlay.placement, 5)
+        card_text = overlay.text.upper() if upper else overlay.text
         lines.append(
-            _event("Card", overlay.start_ms, overlay.end_ms, overlay.text,
+            _event("Card", overlay.start_ms, overlay.end_ms, card_text,
                    max_chars=style.captions.max_chars_per_line, align_override=align)
         )
 
@@ -134,8 +169,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                              animation_prefix=cap_anim if anim_in == "fade" else "")
             )
         else:
+            # Word-mode paths (_word_events) already apply uppercase per word
+            # via _clean_word; sentence-mode captions go straight to _event,
+            # so it's applied here instead.
+            cue_text = cue.text.upper() if upper else cue.text
             lines.append(
-                _event("Caption", cue.start_ms, cue.end_ms, cue.text,
+                _event("Caption", cue.start_ms, cue.end_ms, cue_text,
                        max_chars=style.captions.max_chars_per_line,
                        animation_prefix=cap_anim)
             )
@@ -175,6 +214,8 @@ def build_video_filter(
     color: ColorGrade | None = None,
     grade_spans: list[GradeSpan] | None = None,
     fontsdir: str | None = None,
+    source_size: tuple[int, int] | None = None,
+    letterbox_min_content: float = 0.72,
 ) -> str:
     """Build the ``-vf`` chain: color grade, layout stage, optional punch-in, burn-in.
 
@@ -187,6 +228,11 @@ def build_video_filter(
     their output-time windows using FFmpeg's ``enable=`` expression on ``eq``.
     The ambient grade fills the gaps (everywhere the spans are NOT active).
     Falls back to the simple global ``eq`` when no spans are present.
+
+    Letterbox with ``source_size`` known picks a scale via ``_letterbox_scale``
+    (a flexible, resolution-aware crop — see there) instead of always fitting
+    the whole source; without it (tests that don't probe a real source) it
+    falls back to FFmpeg's own fit-and-pad, matching the old behavior.
     """
     w, h = plan.export_width, plan.export_height
     parts: list[str] = []
@@ -208,9 +254,26 @@ def build_video_filter(
             parts.append(_eq_filter(gs.grade, enable=clause))
     elif color is not None and not color.is_identity():
         parts.append(_eq_filter(color))
-    if plan.export_layout == "letterbox":
-        # Fit the whole source, then pad black bars to the 9:16 canvas. FFmpeg
-        # expressions center the scaled video, so no source dims are needed here.
+    if plan.export_layout == "letterbox" and source_size is not None:
+        # Flexible letterbox: scale by _letterbox_scale (fit_scale..fill_scale,
+        # picked to hit letterbox_min_content without over-cropping), then
+        # pad up to at least WxH (adds bars only if still needed) and crop
+        # down to exactly WxH (removes any width overshoot). At scale ==
+        # fit_scale this reduces to plain fit-and-pad (crop is a no-op).
+        src_w, src_h = source_size
+        scale = _letterbox_scale(w, h, src_w, src_h, min_content_fraction=letterbox_min_content)
+        scaled_w = max(1, round(src_w * scale))
+        scaled_h = max(1, round(src_h * scale))
+        pad_w = max(scaled_w, w)
+        pad_h = max(scaled_h, h)
+        parts += [
+            f"scale={scaled_w}:{scaled_h}",
+            f"pad={pad_w}:{pad_h}:(ow-iw)/2:(oh-ih)/2:color=black",
+            f"crop={w}:{h}:(iw-{w})/2:(ih-{h})/2",
+        ]
+    elif plan.export_layout == "letterbox":
+        # No source dims known (e.g. a unit test): fall back to FFmpeg's own
+        # fit-and-pad, which always shows the whole source with zero crop.
         parts += [
             f"scale={w}:{h}:force_original_aspect_ratio=decrease",
             f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black",
@@ -368,7 +431,10 @@ def render_video(
     # filename: keeps the filtergraph argument free of characters (":" on
     # Windows drive letters) that collide with FFmpeg's filter-option syntax.
     fontsdir = os.path.relpath(FONTS_DIR, work_dir).replace(os.sep, "/")
-    vf = build_video_filter(plan, captions_path.name, color=color, grade_spans=grade_spans, fontsdir=fontsdir)
+    vf = build_video_filter(
+        plan, captions_path.name, color=color, grade_spans=grade_spans, fontsdir=fontsdir,
+        source_size=source_size, letterbox_min_content=style.export.letterbox_min_content,
+    )
 
     cmd = [
         "ffmpeg", "-y",
@@ -496,15 +562,66 @@ def _escape_ass(text: str) -> str:
 # --------------------------------------------------------------------------- #
 # Word-level animated captions
 # --------------------------------------------------------------------------- #
-def _letterbox_bars(export_w: int, export_h: int, src_w: int, src_h: int) -> tuple[int, int, int]:
-    """Return ``(top_bar, band_h, bottom_bar)`` heights for a fit-and-pad layout.
+# Safety cap on letterbox cropping: never crop away more than this fraction of
+# the fitted frame's width, regardless of how far the source's aspect ratio is
+# from the canvas's. Without this an extreme mismatch (e.g. an ultrawide
+# source) would chase the bar-fraction target by cropping most of the subject
+# out of frame; instead it degrades to bigger bars, which is safer.
+_LETTERBOX_MAX_WIDTH_CROP = 0.40
 
-    The source is scaled to fit entirely (``min`` scale factor); the leftover
-    vertical space becomes the black bars. For a landscape source on a 9:16
-    canvas these are the top/bottom bars where captions can live.
+
+def _letterbox_scale(
+    export_w: int,
+    export_h: int,
+    src_w: int,
+    src_h: int,
+    *,
+    min_content_fraction: float = 0.72,
+    max_width_crop: float = _LETTERBOX_MAX_WIDTH_CROP,
+) -> float:
+    """Pick the scale factor for letterbox layout: how much (if any) of the
+    source to crop to shrink the black bars, dynamically for this source's
+    resolution/aspect ratio — never a hardcoded half-and-half split.
+
+    ``fit_scale`` (show the whole source, zero crop) is the floor: it can
+    leave large bars for a wide source on a portrait canvas — often far more
+    than a Reels-style UI actually covers. ``fill_scale`` (zero bars) is the
+    ceiling: it can crop away most of the frame for the same source. The
+    result aims for the smallest crop that gets total bar height down to
+    ``1 - min_content_fraction`` of the canvas, capped so no more than
+    ``max_width_crop`` of the scaled frame's width is ever cropped away — a
+    near-target-aspect source (e.g. 4:5, 1:1) gets barely any crop and hits
+    the target exactly; a very wide source trades the capped amount of crop
+    for smaller (but not eliminated) bars. Only defined for the top/bottom-bar
+    case (source relatively wider than the canvas); a source narrower than
+    the canvas already fits with zero/near-zero bars, so it's returned as-is.
     """
-    scale = min(export_w / src_w, export_h / src_h)
-    band_h = round(src_h * scale)
+    width_bound = export_w / src_w <= export_h / src_h
+    fit_scale = min(export_w / src_w, export_h / src_h)
+    if not width_bound:
+        return fit_scale
+    fill_scale = max(export_w / src_w, export_h / src_h)
+    target_scale = (export_h * min_content_fraction) / src_h
+    max_scale_by_crop = fit_scale / (1 - max_width_crop)
+    return min(fill_scale, max_scale_by_crop, max(fit_scale, target_scale))
+
+
+def _letterbox_bars(
+    export_w: int,
+    export_h: int,
+    src_w: int,
+    src_h: int,
+    *,
+    min_content_fraction: float = 0.72,
+) -> tuple[int, int, int]:
+    """Return ``(top_bar, band_h, bottom_bar)`` heights for the letterbox layout.
+
+    Uses ``_letterbox_scale`` (a flexible, resolution-aware crop) rather than
+    always fitting the whole source, so captions/hook placement matches
+    whatever bar size the renderer actually produces.
+    """
+    scale = _letterbox_scale(export_w, export_h, src_w, src_h, min_content_fraction=min_content_fraction)
+    band_h = min(export_h, round(src_h * scale))
     top_bar = (export_h - band_h) // 2
     bottom_bar = export_h - band_h - top_bar
     return top_bar, band_h, bottom_bar

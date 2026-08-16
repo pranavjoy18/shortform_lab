@@ -11,6 +11,7 @@ planner; ``--use-llm`` opts into the OpenAI planner (which still falls back).
 
 from __future__ import annotations
 
+import random
 import re
 import shutil
 import uuid
@@ -22,6 +23,7 @@ import typer
 from dotenv import load_dotenv
 
 from .config import available_styles, load_style_config, style_explicitly_sets_layout
+from .intent import STYLE_DESCRIPTIONS, CliIO, Question
 from .ffmpeg_tools import ensure_ffmpeg_available, extract_audio, probe_video
 from .models import Transcript
 from .planner import plan_timeline
@@ -45,7 +47,7 @@ def _main() -> None:
 @app.command()
 def process(
     input_video: Path = typer.Argument(..., exists=True, dir_okay=False, help="Raw talking-head clip (mp4/mov)."),
-    style: str = typer.Option("bold_creator", "--style", "-s", help="Style config name from configs/styles/."),
+    style: str | None = typer.Option(None, "--style", "-s", help="Style config name from configs/styles/. Omit to pick from a prompt (or type 'surprise me' for random)."),
     layout: str | None = typer.Option(None, "--layout", help="Override layout: 'fill' (crop) or 'letterbox' (fit + black bars)."),
     tighten: bool | None = typer.Option(None, "--tighten/--no-tighten", help="Override silence/pause compression (default: per style)."),
     color: str | None = typer.Option(None, "--color", help="Override color grade with a named look (e.g. cinematic, vivid, mono)."),
@@ -77,8 +79,8 @@ def process(
             cfg.color.look = choices.color_look
         resolved_style_name = choices.style_name
     else:
-        cfg = load_style_config(style)
-        resolved_style_name = style
+        resolved_style_name = style or _prompt_style_choice(available_styles())
+        cfg = load_style_config(resolved_style_name)
 
     # Explicit CLI flags take precedence over both defaults and interview choices.
     if layout is not None:
@@ -179,6 +181,30 @@ def _resolve_transcript(
         )
     typer.echo("→ No transcript provided; transcribing with OpenAI Whisper...")
     return OpenAITranscriber(normalize=False).transcribe(source, work_dir=run_dir)
+
+
+_SURPRISE_ME = "Surprise me  —  pick a random style for me"
+
+
+def _prompt_style_choice(available: list[str]) -> str:
+    """Ask which style to use when ``--style`` was omitted, listing each style's
+    look with a one-line description plus a random "surprise me" option.
+
+    Unlike the full ``--interactive`` setup interview (which also covers
+    layout/tightening/capitalization), this asks about style alone — so a plain
+    run never silently inherits an arbitrary default the user didn't choose.
+    """
+    choices = [f"{n}  —  {STYLE_DESCRIPTIONS.get(n, n)}" for n in available] + [_SURPRISE_ME]
+    answers = CliIO().ask(
+        [Question(key="style", text="Which caption style would you like?", choices=choices)],
+        preamble="No --style given — pick one:",
+    )
+    picked = answers["style"]
+    if picked == _SURPRISE_ME:
+        picked_name = random.choice(available)
+        typer.echo(f"  Surprise pick: {picked_name}")
+        return picked_name
+    return picked.split("  —  ")[0].split(" — ")[0].strip()
 
 
 def _auto_layout(width: int, height: int) -> Literal["fill", "letterbox"]:

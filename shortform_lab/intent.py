@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 # Style and look descriptions (one line each, shown in the setup interview)
 # --------------------------------------------------------------------------- #
 STYLE_DESCRIPTIONS: dict[str, str] = {
-    "bold_creator":    "Bold sentence captions that pop — high-energy creator look",
+    "bold_creator":    "ALL-CAPS sentence captions with a punchy color grade — high-energy creator look",
     "clean_captions":  "Minimal sentence captions — clean, professional, content-forward",
     "word_pop":        "Word-by-word animated captions — highlights each spoken word",
     "karaoke":         "Color sweeps across the line as each word is spoken",

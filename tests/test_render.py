@@ -15,6 +15,7 @@ from shortform_lab.models import (
 )
 from shortform_lab.render import (
     _letterbox_bars,
+    _letterbox_scale,
     build_concat_filtergraph,
     build_video_filter,
     render_video,
@@ -60,7 +61,9 @@ def _plan() -> EditPlan:
 
 def test_write_captions_ass_contains_all_text(tmp_path: Path):
     # The renderer draws whatever the plan holds; _plan() includes a hook + card.
-    style = load_style_config("bold_creator")
+    # clean_captions (sentence mode, uppercase off) so the assertions can check
+    # exact text without coupling to another style's case-transform choice.
+    style = load_style_config("clean_captions")
     path = write_captions_ass(_plan(), style, tmp_path / "captions.ass")
     content = path.read_text()
     assert "[V4+ Styles]" in content
@@ -115,23 +118,67 @@ def test_build_video_filter_without_punchins():
     assert "between(t" not in vf
 
 
-def test_build_video_filter_letterbox_fits_and_pads():
+def test_build_video_filter_letterbox_fits_and_pads_without_source_size():
+    # No source_size known (e.g. a plain unit test): falls back to FFmpeg's own
+    # fit-and-pad, matching the pre-flexible-crop behavior exactly.
     plan = _plan()
     plan.export_layout = "letterbox"
     plan.punch_ins = []
     vf = build_video_filter(plan, "captions.ass")
     assert "force_original_aspect_ratio=decrease" in vf
     assert "pad=1080:1920" in vf
-    assert "crop=1080:1920" not in vf            # not the fill path
     assert "subtitles=captions.ass" in vf
     assert "format=yuv420p" in vf
 
 
+def test_build_video_filter_letterbox_crops_flexibly_with_source_size():
+    # With source_size known, a 16:9 source is scaled up (cropping some width)
+    # rather than always fitting the whole frame — bars shrink accordingly.
+    plan = _plan()
+    plan.export_layout = "letterbox"
+    plan.punch_ins = []
+    vf = build_video_filter(plan, "captions.ass", source_size=(640, 360))
+    assert "force_original_aspect_ratio" not in vf
+    assert "scale=1800:1012" in vf                # scaled up past fit (scale=1.6875)
+    assert "pad=1800:1920" in vf                  # bars only on height now
+    assert "crop=1080:1920:(iw-1080)/2:(ih-1920)/2" in vf
+    assert "subtitles=captions.ass" in vf
+
+
 def test_letterbox_bars_for_16x9_source():
+    # Old fit-only scale (1.6875) would give band=608/bars=656+656 (68% bars).
+    # The flexible crop trades some width crop (bounded by the safety cap) for
+    # meaningfully smaller bars instead of a hardcoded half-and-half split.
     top, band, bottom = _letterbox_bars(1080, 1920, 640, 360)
-    assert band == 608                            # 360 * (1080/640)
-    assert top == 656 and bottom == 656           # (1920 - 608) / 2
+    assert band == 1012
+    assert top == 454 and bottom == 454
     assert top + band + bottom == 1920
+    assert band > 608                             # strictly better than old fit-only bars
+
+
+def test_letterbox_scale_near_target_aspect_hits_content_target_with_light_crop():
+    # A 1:1 source is much closer to 9:16 than 16:9 is, so it should hit the
+    # min_content_fraction target (0.72 default) without needing the crop cap.
+    scale = _letterbox_scale(1080, 1920, 1080, 1080)
+    band_h = round(1080 * scale)
+    assert band_h == 1382                          # ~0.72 * 1920
+    assert round(1080 * scale) - 1080 < 1080 * 0.40  # crop well within the safety cap
+
+
+def test_letterbox_scale_is_resolution_independent_for_same_aspect():
+    # Doubling the source resolution at the same aspect ratio must produce the
+    # same resulting band height in export pixels — the outcome tracks aspect
+    # ratio, not absolute source resolution.
+    s1 = _letterbox_scale(1080, 1920, 640, 360)
+    s2 = _letterbox_scale(1080, 1920, 1280, 720)
+    assert round(360 * s1) == round(720 * s2)
+
+
+def test_letterbox_scale_portrait_source_falls_back_to_plain_fit():
+    # A source already taller (relative to width) than the canvas has no
+    # top/bottom bars to trade away — behaves exactly like the old fit_scale.
+    scale = _letterbox_scale(1080, 1920, 900, 1920)
+    assert scale == min(1080 / 900, 1920 / 1920)
 
 
 def test_letterbox_anchors_captions_just_below_video(tmp_path: Path):
@@ -142,15 +189,22 @@ def test_letterbox_anchors_captions_just_below_video(tmp_path: Path):
         plan, style, tmp_path / "box.ass", source_size=(640, 360)
     ).read_text()
 
-    def caption_fields(content: str) -> tuple[int, int]:
+    def caption_fields(content: str) -> tuple[int, int, int]:
         line = next(ln for ln in content.splitlines() if ln.startswith("Style: Caption,"))
         fields = line[len("Style: "):].split(",")
-        return int(fields[10]), int(fields[13])  # (Alignment, MarginV)
+        return int(fields[2]), int(fields[10]), int(fields[13])  # (Fontsize, Alignment, MarginV)
 
-    align, margin_v = caption_fields(box)
+    cap_size, align, margin_v = caption_fields(box)
     top_bar, band_h, _ = _letterbox_bars(1080, 1920, 640, 360)
-    band_bottom = top_bar + band_h  # 656 + 608 = 1264
-    cap_size = style.captions.font_size
+    band_bottom = top_bar + band_h  # 454 + 1012 = 1466 (flexible crop, not fit-only)
+    # The rendered font size is scaled up from the style's configured size by
+    # how much more of the source this crop shows vs. a plain fit (see
+    # write_captions_ass's letterbox_font_scale) — recompute the same ratio.
+    fit_scale = min(1080 / 640, 1920 / 360)
+    actual_scale = _letterbox_scale(1080, 1920, 640, 360, min_content_fraction=style.export.letterbox_min_content)
+    expected_cap_size = round(style.captions.font_size * (actual_scale / fit_scale))
+    assert cap_size == expected_cap_size
+    assert cap_size > style.captions.font_size  # this source crops in, so it scaled up
     # Captions are top-anchored (8) and sit *on* the seam: the text top is just
     # above the video's bottom edge (slight overlap), not floating in the bar.
     assert align == 8

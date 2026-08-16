@@ -276,6 +276,15 @@ class ExportSettings(BaseModel):
     # "letterbox" fits the whole source and pads black bars (captions then sit
     # in the bars). This is an axis independent of the caption look.
     layout: Literal["fill", "letterbox"] = "fill"
+    # Letterbox only: target fraction of the export's height that stays visible
+    # video content (the rest becomes top+bottom black bars). This is not a
+    # hardcoded half-and-half split — the renderer only crops as much of the
+    # source as needed to hit this target (capped so it never crops away too
+    # much of the frame width), so a near-target-aspect source gets almost no
+    # crop while a wide source trades some crop for smaller bars. 0.72 default
+    # roughly matches how much of a 9:16 frame a Reels-style UI (top bar +
+    # bottom captions/likes/comments) actually covers.
+    letterbox_min_content: float = Field(default=0.72, gt=0.0, le=1.0)
 
 
 class HookSettings(BaseModel):

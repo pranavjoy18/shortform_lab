@@ -13,9 +13,17 @@ captions:
   max_chars_per_line: 28
   position: bottom
   font_family: "Poppins ExtraBold"
+  # ALL CAPS + a fade-in read as more "bold creator energy" than plain static
+  # sentence-case text — the flat look this style used to ship with.
+  uppercase: true
+  animation_in: fade
 visuals:
   punch_in_count: 2
   text_card_count: 2
   allow_stock_broll: false
 audio:
   normalize: true
+color:
+  # Brighter, higher contrast — pairs with the punch-ins/quote cards for a
+  # more energetic feel than the previous ungraded (flat) default.
+  look: punchy

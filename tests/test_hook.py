@@ -16,6 +16,7 @@ def _style():
     style = load_style_config("bold_creator")
     style.hook.duration_ms = 2500
     style.hook.max_words = 8
+    style.captions.uppercase = False  # explicit baseline case; see test_build_hook_uppercases_when_style_does
     return style
 
 

@@ -73,6 +73,7 @@ def test_color_prepends_eq_before_layout():
 # --------------------------------------------------------------------------- #
 def test_preset_adds_color_skill_when_style_sets_look():
     style = load_style_config("bold_creator")
+    style.color.look = None  # explicit "no grade" baseline, independent of this style's own default
     assert not any(s.name == "color_grade" for s in preset_from_style(style).skills)
     style.color.look = "vivid"
     assert any(s.name == "color_grade" for s in preset_from_style(style).skills)
