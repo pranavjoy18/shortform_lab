@@ -28,6 +28,7 @@ from pathlib import Path
 
 from .agent import Context, FakeClient, LLMClient, OpenAIClient
 from .coherence import check_timeline
+from .concurrency import openai_semaphore
 from .intent import CliIO, ContentAnalysis, CreativeIntent, PlanCritique, QuestionSet
 from .models import StyleConfig, Transcript
 from .orchestrator import DeterministicOrchestrator, compose_timeline
@@ -114,7 +115,7 @@ class LLMOrchestrator:
         self._fallback = DeterministicOrchestrator()
         self._last_raw = ""
 
-    def plan_timeline(
+    async def plan_timeline(
         self,
         transcript: Transcript,
         style: StyleConfig,
@@ -125,7 +126,7 @@ class LLMOrchestrator:
         if not transcript.segments:
             raise ValueError("Cannot plan edits from an empty transcript")
         try:
-            raw = self._call_llm(transcript, style)
+            raw = await self._call_llm(transcript, style)
             plan = self._parse_plan(raw)
             skills = skills_from_plan(plan, style)
             return compose_timeline(skills, transcript, style, source, reason=plan.reason)
@@ -136,22 +137,23 @@ class LLMOrchestrator:
                 error_path.write_text(detail, encoding="utf-8")
             return self._fallback.plan_timeline(transcript, style, source)
 
-    def _call_llm(self, transcript: Transcript, style: StyleConfig) -> str:
-        from openai import OpenAI
+    async def _call_llm(self, transcript: Transcript, style: StyleConfig) -> str:
+        from openai import AsyncOpenAI
 
         system = ORCHESTRATOR_SYSTEM_PROMPT.format(
             toolbox=json.dumps(toolbox_catalog(), ensure_ascii=False, indent=2)
         )
         user = self._build_user_prompt(transcript, style)
-        client = OpenAI()
-        response = client.chat.completions.create(
-            model=self.model,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-        )
+        client = AsyncOpenAI()
+        async with openai_semaphore:
+            response = await client.chat.completions.create(
+                model=self.model,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+            )
         raw = response.choices[0].message.content or ""
         self._last_raw = raw
         return raw
@@ -198,7 +200,7 @@ class AgenticOrchestrator:
         self._fallback  = DeterministicOrchestrator()
         self._last_error: str = ""
 
-    def plan_timeline(
+    async def plan_timeline(
         self,
         transcript: Transcript,
         style: StyleConfig,
@@ -210,7 +212,7 @@ class AgenticOrchestrator:
         if not transcript.segments:
             raise ValueError("Cannot plan edits from an empty transcript")
         try:
-            return self._run(transcript, style, source, interactive=interactive)
+            return await self._run(transcript, style, source, interactive=interactive)
         except Exception as exc:
             self._last_error = str(exc)
             if error_path is not None:
@@ -221,7 +223,7 @@ class AgenticOrchestrator:
                 )
             return self._fallback.plan_timeline(transcript, style, source)
 
-    def _run(
+    async def _run(
         self,
         transcript: Transcript,
         style: StyleConfig,
@@ -251,17 +253,17 @@ class AgenticOrchestrator:
         # Phase 1: optional clarification (interactive only)
         # ----------------------------------------------------------------- #
         if interactive:
-            ctx = self._clarify(ctx, transcript)
+            ctx = await self._clarify(ctx, transcript)
 
         # ----------------------------------------------------------------- #
         # Phase 2: content analysis
         # ----------------------------------------------------------------- #
-        ctx = self._analyse(ctx)
+        ctx = await self._analyse(ctx)
 
         # ----------------------------------------------------------------- #
         # Phase 3: plan in reflection loop (plan-space only, ≤ 2 rounds)
         # ----------------------------------------------------------------- #
-        plan = self._plan_with_reflection(ctx, structural, style, transcript, source)
+        plan = await self._plan_with_reflection(ctx, structural, style, transcript, source)
 
         # ----------------------------------------------------------------- #
         # Phase 4: final compose (structural + decoration)
@@ -273,9 +275,9 @@ class AgenticOrchestrator:
             reason=plan.reason,
         )
 
-    def _clarify(self, ctx: Context, transcript: Transcript) -> Context:
+    async def _clarify(self, ctx: Context, transcript: Transcript) -> Context:
         """Ask the Clarifier what to ask, run the CLI interview, then acknowledge."""
-        result = self._clarifier.invoke("Ask what you need to edit this clip well.", ctx)
+        result = await self._clarifier.invoke("Ask what you need to edit this clip well.", ctx)
         qset: QuestionSet | None = result.parsed
         io = CliIO()
         if qset is None:
@@ -286,15 +288,15 @@ class AgenticOrchestrator:
         intent = CreativeIntent(answers=answers)
         return ctx.with_(intent=intent.render())
 
-    def _analyse(self, ctx: Context) -> Context:
+    async def _analyse(self, ctx: Context) -> Context:
         """Run the Analyst; add its output to context (best-effort)."""
-        result = self._analyst.invoke("Analyze this clip for editing cues.", ctx)
+        result = await self._analyst.invoke("Analyze this clip for editing cues.", ctx)
         analysis: ContentAnalysis | None = result.parsed
         if analysis is None:
             return ctx
         return ctx.with_(analysis=analysis.render())
 
-    def _plan_with_reflection(
+    async def _plan_with_reflection(
         self,
         ctx: Context,
         structural: list,
@@ -309,7 +311,7 @@ class AgenticOrchestrator:
         taste review → Planner revises if not approved. Bounded to max_rounds;
         last plan is used regardless. Coherence gate still runs downstream.
         """
-        result = self._planner.invoke("Produce the edit plan for this clip.", ctx)
+        result = await self._planner.invoke("Produce the edit plan for this clip.", ctx)
         plan: SkillPlan | None = result.parsed
 
         if plan is None:
@@ -325,7 +327,7 @@ class AgenticOrchestrator:
                 proposed_plan=plan.model_dump_json(indent=2),
                 coherence_violations=json.dumps(violations, indent=2),
             )
-            critique_result = self._critic.invoke(
+            critique_result = await self._critic.invoke(
                 "Review this plan. Approve or provide concrete fixes.", critique_ctx
             )
             critique: PlanCritique | None = critique_result.parsed
@@ -345,7 +347,7 @@ class AgenticOrchestrator:
                 f"Requested fixes:\n{fixes_text or '(none)'}\n\n"
                 f"Coherence violations:\n{json.dumps(violations, indent=2)}"
             )
-            revision_result = self._planner.invoke(
+            revision_result = await self._planner.invoke(
                 "Revise the plan to address the feedback.",
                 ctx.with_(feedback=feedback, previous_plan=plan.model_dump_json(indent=2)),
             )

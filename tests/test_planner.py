@@ -77,9 +77,9 @@ def test_clean_captions_style_yields_fewer_visuals():
     assert len(plan.punch_ins) <= 1
 
 
-def test_plan_edits_defaults_to_deterministic():
+async def test_plan_edits_defaults_to_deterministic():
     style = load_style_config("bold_creator")
-    plan = plan_edits(_transcript(), style, source_video="source.mp4")
+    plan = await plan_edits(_transcript(), style, source_video="source.mp4")
     assert isinstance(plan, EditPlan)
 
 
@@ -127,7 +127,7 @@ def test_deterministic_word_style_plan_carries_word_cues():
     assert all(c.words for c in plan.captions)
 
 
-def test_plan_edits_tightens_when_enabled():
+async def test_plan_edits_tightens_when_enabled():
     style = load_style_config("bold_creator")
     style.tighten.enabled = True
     # Two phrases with a 3s dead-air gap between them.
@@ -135,16 +135,16 @@ def test_plan_edits_tightens_when_enabled():
         TranscriptSegment(start_ms=0, end_ms=1000, text="Hello there friend."),
         TranscriptSegment(start_ms=4000, end_ms=5000, text="Welcome back everyone."),
     ])
-    plan = plan_edits(t, style, source_video="s.mp4", source_duration_ms=5000)
+    plan = await plan_edits(t, style, source_video="s.mp4", source_duration_ms=5000)
     assert plan.keep_ranges, "tightening should produce a cut list"
     # Captions are in output time: they start at 0 and the gap is compressed.
     assert plan.captions[0].start_ms == 0
     assert plan.captions[-1].start_ms < 4000
 
 
-def test_plan_edits_no_tighten_leaves_keep_ranges_empty():
+async def test_plan_edits_no_tighten_leaves_keep_ranges_empty():
     style = load_style_config("bold_creator")  # tighten disabled by default
-    plan = plan_edits(_transcript(), style, source_video="s.mp4")
+    plan = await plan_edits(_transcript(), style, source_video="s.mp4")
     assert plan.keep_ranges == []
 
 
@@ -159,7 +159,7 @@ def test_plan_pins_export_layout_from_style():
     assert box.export_layout == "letterbox"
 
 
-def test_plan_edits_llm_falls_back_to_deterministic(tmp_path: Path, monkeypatch):
+async def test_plan_edits_llm_falls_back_to_deterministic(tmp_path: Path, monkeypatch):
     """When the LLM call blows up, plan_edits still returns a valid plan and logs."""
     style = load_style_config("bold_creator")
 
@@ -173,7 +173,7 @@ def test_plan_edits_llm_falls_back_to_deterministic(tmp_path: Path, monkeypatch)
     # fallback path.
     monkeypatch.setattr("shortform_lab.llm_orchestrator.AgenticOrchestrator._run", boom)
     error_path = tmp_path / "planner_error.txt"
-    plan = plan_edits(
+    plan = await plan_edits(
         _transcript(), style, source_video="source.mp4", use_llm=True, error_path=error_path
     )
 

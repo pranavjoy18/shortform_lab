@@ -21,6 +21,7 @@ import json
 from pathlib import Path
 from typing import Protocol
 
+from .concurrency import openai_semaphore
 from .ffmpeg_tools import extract_audio
 from .models import Transcript, TranscriptSegment, WordTiming
 
@@ -28,7 +29,7 @@ from .models import Transcript, TranscriptSegment, WordTiming
 class Transcriber(Protocol):
     """Anything that can turn a video into a ``Transcript``."""
 
-    def transcribe(self, video_path: Path, *, work_dir: Path) -> Transcript:
+    async def transcribe(self, video_path: Path, *, work_dir: Path) -> Transcript:
         ...
 
 
@@ -93,7 +94,7 @@ class ProvidedTranscriptTranscriber:
     def __init__(self, transcript_path: Path):
         self.transcript_path = transcript_path
 
-    def transcribe(self, video_path: Path, *, work_dir: Path) -> Transcript:
+    async def transcribe(self, video_path: Path, *, work_dir: Path) -> Transcript:
         # video_path/work_dir are unused: the transcript already exists.
         return load_transcript(self.transcript_path)
 
@@ -109,25 +110,26 @@ class OpenAITranscriber:
         self.model = model
         self.normalize = normalize
 
-    def transcribe(self, video_path: Path, *, work_dir: Path) -> Transcript:
+    async def transcribe(self, video_path: Path, *, work_dir: Path) -> Transcript:
         try:
-            from openai import OpenAI
+            from openai import AsyncOpenAI
         except ImportError as exc:  # pragma: no cover - exercised only without extra
             raise RuntimeError(
                 "OpenAI transcription requires the 'openai' extra: uv sync --extra openai"
             ) from exc
 
         audio_path = work_dir / "audio.wav"
-        extract_audio(video_path, audio_path, normalize=self.normalize)
+        await extract_audio(video_path, audio_path, normalize=self.normalize)
 
-        client = OpenAI()
+        client = AsyncOpenAI()
         with audio_path.open("rb") as fh:
-            response = client.audio.transcriptions.create(
-                model=self.model,
-                file=fh,
-                response_format="verbose_json",
-                timestamp_granularities=["segment", "word"],
-            )
+            async with openai_semaphore:
+                response = await client.audio.transcriptions.create(
+                    model=self.model,
+                    file=fh,
+                    response_format="verbose_json",
+                    timestamp_granularities=["segment", "word"],
+                )
 
         all_words = [
             WordTiming(
@@ -156,3 +158,54 @@ class OpenAITranscriber:
 
         language = getattr(response, "language", "en") or "en"
         return Transcript(language=language, segments=segments)
+
+
+class OpenAITranslator:
+    """Translate non-English speech straight to English captions via OpenAI's
+    Whisper *translations* endpoint (``audio.translations.create``, always
+    English output, ``whisper-1`` only).
+
+    Unlike ``OpenAITranscriber``, this endpoint doesn't accept
+    ``timestamp_granularities``/return word timestamps — only segment-level
+    text + timing. So segments come back with no ``words``, and downstream
+    word-mode caption styles (``word_pop``/``karaoke``/``one_word``/
+    ``active_word``) fall back to ``build_captions``'s even-spaced timing
+    synthesis rather than real per-word timestamps.
+    """
+
+    def __init__(self, *, normalize: bool = False):
+        self.normalize = normalize
+
+    async def transcribe(self, video_path: Path, *, work_dir: Path) -> Transcript:
+        try:
+            from openai import AsyncOpenAI
+        except ImportError as exc:  # pragma: no cover - exercised only without extra
+            raise RuntimeError(
+                "OpenAI translation requires the 'openai' extra: uv sync --extra openai"
+            ) from exc
+
+        audio_path = work_dir / "audio.wav"
+        await extract_audio(video_path, audio_path, normalize=self.normalize)
+
+        client = AsyncOpenAI()
+        with audio_path.open("rb") as fh:
+            async with openai_semaphore:
+                response = await client.audio.translations.create(
+                    model="whisper-1",
+                    file=fh,
+                    response_format="verbose_json",
+                )
+
+        segments: list[TranscriptSegment] = []
+        for seg in getattr(response, "segments", []) or []:
+            text = (getattr(seg, "text", "") or "").strip()
+            if not text:
+                continue
+            start_ms = int(round(float(seg.start) * 1000))
+            end_ms = int(round(float(seg.end) * 1000))
+            segments.append(TranscriptSegment(start_ms=start_ms, end_ms=end_ms, text=text))
+        if not segments:
+            raise RuntimeError("OpenAI translation returned no segments")
+
+        # The translations endpoint always outputs English regardless of source language.
+        return Transcript(language="en", segments=segments)

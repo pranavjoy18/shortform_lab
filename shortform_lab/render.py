@@ -391,7 +391,7 @@ def build_concat_filtergraph(
     return ";".join(parts), audio_label
 
 
-def render_video(
+async def render_video(
     plan: EditPlan,
     input_path: Path,
     output_path: Path,
@@ -419,7 +419,7 @@ def render_video(
     if plan.export_layout == "letterbox":
         from .ffmpeg_tools import probe_video
 
-        info = probe_video(input_path)
+        info = await probe_video(input_path)
         source_size = (info.width, info.height)
 
     captions_path = work_dir / "captions.ass"
@@ -474,7 +474,7 @@ def render_video(
     cmd += [str(output_path.resolve())]
 
     # Run inside work_dir so the bare captions filename resolves for the filter.
-    _run_in(cmd, cwd=work_dir)
+    await _run_in(cmd, cwd=work_dir)
 
     if not output_path.is_file():
         raise RuntimeError(f"Render produced no file at {output_path}")
@@ -484,18 +484,27 @@ def render_video(
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
-def _run_in(cmd: list[str], *, cwd: Path):
-    import subprocess
+async def _run_in(cmd: list[str], *, cwd: Path):
+    import asyncio
 
+    from .concurrency import ffmpeg_semaphore
     from .ffmpeg_tools import FFmpegError
 
-    try:
-        return subprocess.run(cmd, capture_output=True, text=True, check=True, cwd=str(cwd))
-    except FileNotFoundError as exc:
-        raise FFmpegError(f"Command not found: {cmd[0]}") from exc
-    except subprocess.CalledProcessError as exc:
-        stderr = (exc.stderr or "").strip()
-        raise FFmpegError(f"Render failed: exit {exc.returncode}\n{stderr}") from exc
+    async with ffmpeg_semaphore:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=str(cwd),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError as exc:
+            raise FFmpegError(f"Command not found: {cmd[0]}") from exc
+        _stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise FFmpegError(
+                f"Render failed: exit {proc.returncode}\n{stderr.decode(errors='replace').strip()}"
+            )
 
 
 def _ass_time(ms: int) -> str:

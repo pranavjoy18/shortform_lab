@@ -11,6 +11,7 @@ planner; ``--use-llm`` opts into the OpenAI planner (which still falls back).
 
 from __future__ import annotations
 
+import asyncio
 import random
 import re
 import shutil
@@ -25,13 +26,13 @@ from dotenv import load_dotenv
 from .config import available_styles, load_style_config, style_explicitly_sets_layout
 from .intent import STYLE_DESCRIPTIONS, CliIO, Question
 from .ffmpeg_tools import ensure_ffmpeg_available, extract_audio, probe_video
-from .models import Transcript
+from .models import StyleConfig, Transcript
 from .planner import plan_timeline
 from .reports import write_review
 from .render import render_video
 from .skills.color import LOOKS
 from .timeline import timeline_to_editplan
-from .transcribe import OpenAITranscriber, load_transcript
+from .transcribe import OpenAITranscriber, OpenAITranslator, load_transcript
 
 app = typer.Typer(add_completion=False, help="Local talking-head video enhancer.")
 
@@ -52,6 +53,7 @@ def process(
     tighten: bool | None = typer.Option(None, "--tighten/--no-tighten", help="Override silence/pause compression (default: per style)."),
     color: str | None = typer.Option(None, "--color", help="Override color grade with a named look (e.g. cinematic, vivid, mono)."),
     transcript: Path | None = typer.Option(None, "--transcript", "-t", help="Existing transcript JSON (skips transcription)."),
+    translate: bool = typer.Option(False, "--translate", help="Translate non-English speech to English captions via OpenAI's Whisper translations endpoint (segment-level timing only, no word timestamps; ignored with --transcript)."),
     use_llm: bool = typer.Option(False, "--use-llm", help="Use the agentic edit planner (falls back deterministically)."),
     interactive: bool = typer.Option(False, "--interactive", "-i", help="Before planning, ask creative-intent questions in the terminal (implies --use-llm)."),
     debug: bool = typer.Option(False, "--debug", help="Testing only: allow the deterministic planner's hook (purely extractive, never real hook copy — see plan_timeline's docstring). Has no effect on --use-llm, which writes real hook copy on its own."),
@@ -103,8 +105,38 @@ def process(
     source_copy = run_dir / "source.mp4"
     shutil.copy2(input_video, source_copy)
 
+    use_llm = use_llm or interactive  # --interactive implies --use-llm
+    asyncio.run(
+        _process_pipeline(
+            input_video, source_copy, run_dir, cfg,
+            resolved_style_name=resolved_style_name,
+            layout_explicit=layout_explicit,
+            transcript=transcript,
+            translate=translate,
+            use_llm=use_llm,
+            interactive=interactive,
+            debug=debug,
+        )
+    )
+
+
+async def _process_pipeline(
+    input_video: Path,
+    source_copy: Path,
+    run_dir: Path,
+    cfg: StyleConfig,
+    *,
+    resolved_style_name: str,
+    layout_explicit: bool,
+    transcript: Path | None,
+    translate: bool,
+    use_llm: bool,
+    interactive: bool,
+    debug: bool,
+) -> None:
+    """The I/O-bound half of ``process``: probe/transcribe/plan/render/review."""
     # 2. Probe + extract audio.
-    info = probe_video(source_copy)
+    info = await probe_video(source_copy)
     # No explicit layout choice (CLI flag / interactive answer) and the style
     # itself doesn't pin one: default the layout from the source's own
     # resolution instead of always falling back to ExportSettings' "fill".
@@ -114,10 +146,10 @@ def process(
                f"audio={info.has_audio}, layout={cfg.export.layout}")
     audio_path = run_dir / "audio.wav"
     if info.has_audio:
-        extract_audio(source_copy, audio_path, normalize=cfg.audio.normalize)
+        await extract_audio(source_copy, audio_path, normalize=cfg.audio.normalize)
 
     # 3. Transcribe (or load provided transcript).
-    transcript_obj = _resolve_transcript(transcript, source_copy, run_dir, info.has_audio)
+    transcript_obj = await _resolve_transcript(transcript, source_copy, run_dir, info.has_audio, translate)
     (run_dir / "transcript.json").write_text(
         transcript_obj.model_dump_json(indent=2), encoding="utf-8"
     )
@@ -125,9 +157,8 @@ def process(
 
     # 4. Plan edits. The Timeline is the richer artifact; edit_plan.json is the
     #    renderer-facing adapter view of it.
-    use_llm = use_llm or interactive  # --interactive implies --use-llm
     error_path = run_dir / "planner_error.txt"
-    timeline = plan_timeline(
+    timeline = await plan_timeline(
         transcript_obj, cfg,
         source_video=source_copy.name,
         use_llm=use_llm,
@@ -153,8 +184,8 @@ def process(
     # 5. Render. Pass the Timeline so the renderer can read Timeline-direct tracks
     #    (the color grade) that the EditPlan does not carry.
     final_path = run_dir / "final.mp4"
-    render_video(plan, source_copy, final_path, cfg, has_audio=info.has_audio,
-                 work_dir=run_dir, timeline=timeline)
+    await render_video(plan, source_copy, final_path, cfg, has_audio=info.has_audio,
+                        work_dir=run_dir, timeline=timeline)
     typer.echo(f"→ Rendered: {final_path}")
 
     # 6. Review report.
@@ -170,8 +201,8 @@ def process(
     typer.echo(f"✓ Done. See {run_dir / 'review.md'} and {final_path}")
 
 
-def _resolve_transcript(
-    transcript: Path | None, source: Path, run_dir: Path, has_audio: bool
+async def _resolve_transcript(
+    transcript: Path | None, source: Path, run_dir: Path, has_audio: bool, translate: bool
 ) -> Transcript:
     if transcript is not None:
         return load_transcript(transcript)
@@ -179,8 +210,11 @@ def _resolve_transcript(
         raise typer.BadParameter(
             "Source has no audio track and no --transcript was provided."
         )
+    if translate:
+        typer.echo("→ No transcript provided; translating to English with OpenAI Whisper...")
+        return await OpenAITranslator(normalize=False).transcribe(source, work_dir=run_dir)
     typer.echo("→ No transcript provided; transcribing with OpenAI Whisper...")
-    return OpenAITranscriber(normalize=False).transcribe(source, work_dir=run_dir)
+    return await OpenAITranscriber(normalize=False).transcribe(source, work_dir=run_dir)
 
 
 _SURPRISE_ME = "Surprise me  —  pick a random style for me"

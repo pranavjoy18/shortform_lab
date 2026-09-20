@@ -28,8 +28,8 @@ def _source(duration_ms):
                     duration_ms=duration_ms, has_audio=True)
 
 
-def _plan(orch, transcript, style, **kw):
-    return orch.plan_timeline(transcript, style, _source(transcript.duration_ms), **kw)
+async def _plan(orch, transcript, style, **kw):
+    return await orch.plan_timeline(transcript, style, _source(transcript.duration_ms), **kw)
 
 
 # --------------------------------------------------------------------------- #
@@ -56,7 +56,7 @@ def test_build_skill_rejects_bad_params():
 # --------------------------------------------------------------------------- #
 # LLM orchestrator (mocked call)
 # --------------------------------------------------------------------------- #
-def test_llm_plan_builds_timeline_from_chosen_skills(monkeypatch):
+async def test_llm_plan_builds_timeline_from_chosen_skills(monkeypatch):
     style = load_style_config("bold_creator")  # hook off by default; LLM enables it
     fake = (
         '{"skills": ['
@@ -66,54 +66,72 @@ def test_llm_plan_builds_timeline_from_chosen_skills(monkeypatch):
         '{"name": "punch_in", "params": {"count": 1}}], '
         '"reason": "tight open with a hook"}'
     )
-    monkeypatch.setattr(LLMOrchestrator, "_call_llm", lambda self, t, s: fake)
+    async def fake_call(self, t, s):
+        return fake
 
-    tl = _plan(LLMOrchestrator(), _transcript(), style)
+    monkeypatch.setattr(LLMOrchestrator, "_call_llm", fake_call)
+
+    tl = await _plan(LLMOrchestrator(), _transcript(), style)
     assert tl.hook is not None                      # LLM chose to add a hook
     assert tl.captions
     assert len(tl.punch_ins) == 1                   # LLM-overridden count
     assert tl.meta["reason"] == "tight open with a hook"
 
 
-def test_llm_plan_omitting_a_skill_leaves_that_track_empty(monkeypatch):
+async def test_llm_plan_omitting_a_skill_leaves_that_track_empty(monkeypatch):
     style = load_style_config("bold_creator")
     fake = '{"skills": [{"name": "add_captions"}], "reason": "captions only"}'
-    monkeypatch.setattr(LLMOrchestrator, "_call_llm", lambda self, t, s: fake)
 
-    tl = _plan(LLMOrchestrator(), _transcript(), style)
+    async def fake_call(self, t, s):
+        return fake
+
+    monkeypatch.setattr(LLMOrchestrator, "_call_llm", fake_call)
+
+    tl = await _plan(LLMOrchestrator(), _transcript(), style)
     assert tl.captions
     assert tl.hook is None
     assert tl.overlays == []
     assert tl.punch_ins == []
 
 
-def test_llm_word_mode_captions_come_from_transcript(monkeypatch):
+async def test_llm_word_mode_captions_come_from_transcript(monkeypatch):
     # The LLM only *chooses* add_captions; the word-level timing is built
     # deterministically from the transcript, never from the model.
     style = load_style_config("word_pop")
     fake = '{"skills": [{"name": "add_captions"}], "reason": "words"}'
-    monkeypatch.setattr(LLMOrchestrator, "_call_llm", lambda self, t, s: fake)
+
+    async def fake_call(self, t, s):
+        return fake
+
+    monkeypatch.setattr(LLMOrchestrator, "_call_llm", fake_call)
 
     words = load_transcript(Path(__file__).parent / "fixtures" / "transcript_words.json")
-    tl = LLMOrchestrator().plan_timeline(words, style, _source(words.duration_ms))
+    tl = await LLMOrchestrator().plan_timeline(words, style, _source(words.duration_ms))
     assert all(c.words for c in tl.captions)
     assert tl.captions[0].words[0].text == "Most"
 
 
-def test_llm_unknown_skill_falls_back(monkeypatch, tmp_path):
+async def test_llm_unknown_skill_falls_back(monkeypatch, tmp_path):
     style = load_style_config("bold_creator")
-    monkeypatch.setattr(LLMOrchestrator, "_call_llm",
-                        lambda self, t, s: '{"skills": [{"name": "make_it_viral"}]}')
+
+    async def fake_call(self, t, s):
+        return '{"skills": [{"name": "make_it_viral"}]}'
+
+    monkeypatch.setattr(LLMOrchestrator, "_call_llm", fake_call)
     error_path = tmp_path / "err.txt"
-    tl = _plan(LLMOrchestrator(), _transcript(), style, error_path=error_path)
+    tl = await _plan(LLMOrchestrator(), _transcript(), style, error_path=error_path)
     # Fell back to the deterministic preset (bold_creator: captions + punch-ins).
     assert tl.captions
     assert error_path.is_file()
     assert "unknown skill" in error_path.read_text()
 
 
-def test_llm_malformed_json_falls_back(monkeypatch):
+async def test_llm_malformed_json_falls_back(monkeypatch):
     style = load_style_config("bold_creator")
-    monkeypatch.setattr(LLMOrchestrator, "_call_llm", lambda self, t, s: "not json at all")
-    tl = _plan(LLMOrchestrator(), _transcript(), style)
+
+    async def fake_call(self, t, s):
+        return "not json at all"
+
+    monkeypatch.setattr(LLMOrchestrator, "_call_llm", fake_call)
+    tl = await _plan(LLMOrchestrator(), _transcript(), style)
     assert tl.captions  # deterministic fallback still produced a plan

@@ -50,13 +50,15 @@ class DeterministicPlanner:
         self, transcript: Transcript, style: StyleConfig, *, source_video: str, debug: bool = False
     ) -> EditPlan:
         source = _spine_source(source_video, transcript.duration_ms, transcript)
+        # DeterministicOrchestrator.plan_timeline is pure/sync (no I/O) — called
+        # directly, no event loop needed.
         tl = DeterministicOrchestrator().plan_timeline(
             transcript, style, source, tighten=False, debug=debug
         )
         return timeline_to_editplan(tl)
 
 
-def plan_timeline(
+async def plan_timeline(
     transcript: Transcript,
     style: StyleConfig,
     *,
@@ -84,7 +86,7 @@ def plan_timeline(
     """
     source = _spine_source(source_video, source_duration_ms, transcript)
     if use_llm:
-        return AgenticOrchestrator(model=model).plan_timeline(
+        return await AgenticOrchestrator(model=model).plan_timeline(
             transcript, style, source,
             interactive=interactive,
             error_path=error_path,
@@ -94,7 +96,7 @@ def plan_timeline(
     )
 
 
-def plan_edits(
+async def plan_edits(
     transcript: Transcript,
     style: StyleConfig,
     *,
@@ -107,16 +109,15 @@ def plan_edits(
     debug: bool = False,
 ) -> EditPlan:
     """Plan edits and adapt the resulting Timeline to an ``EditPlan`` (back-compat)."""
-    return timeline_to_editplan(
-        plan_timeline(
-            transcript,
-            style,
-            source_video=source_video,
-            use_llm=use_llm,
-            interactive=interactive,
-            model=model,
-            error_path=error_path,
-            source_duration_ms=source_duration_ms,
-            debug=debug,
-        )
+    tl = await plan_timeline(
+        transcript,
+        style,
+        source_video=source_video,
+        use_llm=use_llm,
+        interactive=interactive,
+        model=model,
+        error_path=error_path,
+        source_duration_ms=source_duration_ms,
+        debug=debug,
     )
+    return timeline_to_editplan(tl)

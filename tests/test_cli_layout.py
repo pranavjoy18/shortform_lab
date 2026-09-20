@@ -62,13 +62,13 @@ def fake_pipeline(monkeypatch: pytest.MonkeyPatch):
     """Stub out everything FFmpeg-shaped so ``process()`` runs on a canned probe."""
     probed: dict[str, VideoInfo] = {}
 
-    def fake_probe_video(path: Path) -> VideoInfo:
+    async def fake_probe_video(path: Path) -> VideoInfo:
         return probed["info"]
 
-    def fake_extract_audio(*args, **kwargs):
+    async def fake_extract_audio(*args, **kwargs):
         raise AssertionError("extract_audio should not run when has_audio=False")
 
-    def fake_render_video(plan, source, dest, style, *, has_audio, work_dir, timeline=None):
+    async def fake_render_video(plan, source, dest, style, *, has_audio, work_dir, timeline=None):
         Path(dest).write_bytes(b"fake")
 
     monkeypatch.setattr(cli, "ensure_ffmpeg_available", lambda: None)

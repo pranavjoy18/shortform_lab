@@ -22,6 +22,7 @@ openai = [
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
+    "pytest-asyncio>=1.0.0",
 ]
 
 [tool.pytest.ini_options]
@@ -29,4 +30,5 @@ dev = [
 # import path for tests rather than requiring an editable install.
 pythonpath = ["."]
 testpaths = ["tests"]
+asyncio_mode = "auto"
 

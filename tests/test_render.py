@@ -255,11 +255,11 @@ def test_one_word_uses_centered_big_style(tmp_path: Path):
 
 
 @ffmpeg_required
-def test_render_word_style_produces_video(sample_video: Path, tmp_path: Path):
+async def test_render_word_style_produces_video(sample_video: Path, tmp_path: Path):
     style = load_style_config("word_pop")
     out = tmp_path / "final.mp4"
-    render_video(_word_plan(), sample_video, out, style, has_audio=True, work_dir=tmp_path)
-    info = probe_video(out)
+    await render_video(_word_plan(), sample_video, out, style, has_audio=True, work_dir=tmp_path)
+    info = await probe_video(out)
     assert info.width == 1080 and info.height == 1920
 
 
@@ -288,40 +288,40 @@ def test_concat_filtergraph_without_audio():
 
 
 @ffmpeg_required
-def test_render_with_cuts_shortens_video(sample_video: Path, tmp_path: Path):
+async def test_render_with_cuts_shortens_video(sample_video: Path, tmp_path: Path):
     style = load_style_config("bold_creator")
     plan = _plan()
     # Sample is 3s; keep ~1.8s across two spans.
     plan.keep_ranges = [TimeRange(start_ms=0, end_ms=1000), TimeRange(start_ms=2000, end_ms=2800)]
     out = tmp_path / "final.mp4"
-    render_video(plan, sample_video, out, style, has_audio=True, work_dir=tmp_path)
-    info = probe_video(out)
+    await render_video(plan, sample_video, out, style, has_audio=True, work_dir=tmp_path)
+    info = await probe_video(out)
     assert info.width == 1080 and info.height == 1920
     assert info.duration_ms < 2500  # clearly shorter than the 3s source
 
 
 @ffmpeg_required
-def test_render_letterbox_produces_vertical_video(sample_video: Path, tmp_path: Path):
+async def test_render_letterbox_produces_vertical_video(sample_video: Path, tmp_path: Path):
     style = load_style_config("reels_letterbox")
     plan = _word_plan()
     plan.export_layout = "letterbox"
     out = tmp_path / "final.mp4"
-    render_video(plan, sample_video, out, style, has_audio=True, work_dir=tmp_path)
-    info = probe_video(out)
+    await render_video(plan, sample_video, out, style, has_audio=True, work_dir=tmp_path)
+    info = await probe_video(out)
     assert info.width == 1080 and info.height == 1920
 
 
 @ffmpeg_required
-def test_render_produces_vertical_video(sample_video: Path, tmp_path: Path):
+async def test_render_produces_vertical_video(sample_video: Path, tmp_path: Path):
     style = load_style_config("bold_creator")
     out = tmp_path / "final.mp4"
-    result = render_video(
+    result = await render_video(
         _plan(), sample_video, out, style, has_audio=True, work_dir=tmp_path
     )
     assert result.output_path.is_file()
     assert result.captions_path.is_file()
 
-    info = probe_video(out)
+    info = await probe_video(out)
     assert info.width == 1080
     assert info.height == 1920
     assert info.has_audio is True

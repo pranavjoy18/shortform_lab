@@ -26,6 +26,8 @@ from typing import Any, Callable, Protocol, TypedDict
 
 from pydantic import BaseModel
 
+from .concurrency import openai_semaphore
+
 
 # --------------------------------------------------------------------------- #
 # Wire protocol
@@ -54,7 +56,7 @@ class LLMClient(Protocol):
     swapping providers or going offline requires no changes above this line.
     """
 
-    def complete(
+    async def complete(
         self,
         system: str,
         messages: list[Msg],
@@ -70,21 +72,22 @@ class OpenAIClient:
 
     model: str = "gpt-4o-mini"
 
-    def complete(
+    async def complete(
         self,
         system: str,
         messages: list[Msg],
         *,
         schema: type[BaseModel] | None = None,
     ) -> str:
-        from openai import OpenAI  # lazy; optional extra
+        from openai import AsyncOpenAI  # lazy; optional extra
 
         fmt = {"type": "json_object"} if schema is not None else None
-        resp = OpenAI().chat.completions.create(
-            model=self.model,
-            response_format=fmt,
-            messages=[{"role": "system", "content": system}] + list(messages),
-        )
+        async with openai_semaphore:
+            resp = await AsyncOpenAI().chat.completions.create(
+                model=self.model,
+                response_format=fmt,
+                messages=[{"role": "system", "content": system}] + list(messages),
+            )
         return resp.choices[0].message.content or ""
 
 
@@ -99,7 +102,7 @@ class FakeClient:
 
     response: str | Callable[[str, list[Msg]], str]
 
-    def complete(
+    async def complete(
         self,
         system: str,
         messages: list[Msg],
@@ -202,7 +205,7 @@ class Agent:
     output_schema: type[BaseModel] | None = None
     tools: tuple[Tool, ...] = ()
 
-    def invoke(
+    async def invoke(
         self,
         task: str,
         context: Context | None = None,
@@ -220,8 +223,8 @@ class Agent:
         user_content = (context.render() + "\n\n" + task) if context else task
         msgs: list[Msg] = list(history or []) + [user(user_content)]
 
-        raw = self.client.complete(system, msgs, schema=self.output_schema)
-        parsed, raw, msgs = self._parse_with_repair(raw, system, msgs)
+        raw = await self.client.complete(system, msgs, schema=self.output_schema)
+        parsed, raw, msgs = await self._parse_with_repair(raw, system, msgs)
         full_history = msgs + [assistant(raw)]
         return AgentResult(text=raw, parsed=parsed, messages=full_history)
 
@@ -242,7 +245,7 @@ class Agent:
         )
         return f"{self.instructions}\n\nAvailable tools (select via structured output):\n{catalog}"
 
-    def _parse_with_repair(
+    async def _parse_with_repair(
         self,
         raw: str,
         system: str,
@@ -261,7 +264,7 @@ class Agent:
                 "Return ONLY valid JSON that satisfies the schema. No prose, no fences."
             )
             repair_msgs: list[Msg] = msgs + [assistant(raw), user(repair_prompt)]
-            raw2 = self.client.complete(system, repair_msgs, schema=self.output_schema)
+            raw2 = await self.client.complete(system, repair_msgs, schema=self.output_schema)
             try:
                 return self.output_schema.model_validate_json(_strip_fences(raw2)), raw2, repair_msgs
             except Exception:

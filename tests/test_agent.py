@@ -55,26 +55,26 @@ def test_context_stringify_handles_pydantic_model():
 # --------------------------------------------------------------------------- #
 # FakeClient + Agent.invoke basics
 # --------------------------------------------------------------------------- #
-def test_agent_invoke_returns_text():
+async def test_agent_invoke_returns_text():
     agent = Agent("t", "be helpful", FakeClient('{"msg": "hi"}'))
-    result = agent.invoke("hello")
+    result = await agent.invoke("hello")
     assert result.text == '{"msg": "hi"}'
     assert result.parsed is None  # no output_schema
 
 
-def test_agent_invoke_parses_structured_output():
+async def test_agent_invoke_parses_structured_output():
     from pydantic import BaseModel
 
     class Out(BaseModel):
         value: int
 
     agent = Agent("t", "return json", FakeClient('{"value": 42}'), output_schema=Out)
-    result = agent.invoke("go")
+    result = await agent.invoke("go")
     assert isinstance(result.parsed, Out)
     assert result.parsed.value == 42
 
 
-def test_agent_self_repair_on_bad_json():
+async def test_agent_self_repair_on_bad_json():
     """First call returns garbage; repair call returns valid JSON."""
     from pydantic import BaseModel
 
@@ -88,23 +88,23 @@ def test_agent_self_repair_on_bad_json():
         return '{"x": 7}' if len(calls) > 1 else "oops not json"
 
     agent = Agent("t", "json", FakeClient(dynamic), output_schema=Out)
-    result = agent.invoke("go")
+    result = await agent.invoke("go")
     assert result.parsed is not None and result.parsed.x == 7
     assert len(calls) == 2  # initial + one repair
 
 
-def test_agent_parsed_is_none_when_repair_also_fails():
+async def test_agent_parsed_is_none_when_repair_also_fails():
     from pydantic import BaseModel
 
     class Out(BaseModel):
         x: int
 
     agent = Agent("t", "json", FakeClient("still broken"), output_schema=Out)
-    result = agent.invoke("go")
+    result = await agent.invoke("go")
     assert result.parsed is None
 
 
-def test_agent_history_is_threaded_through_messages():
+async def test_agent_history_is_threaded_through_messages():
     history = [{"role": "user", "content": "previous"}, {"role": "assistant", "content": "ok"}]
     seen = []
 
@@ -113,12 +113,12 @@ def test_agent_history_is_threaded_through_messages():
         return "done"
 
     agent = Agent("t", "be helpful", FakeClient(capture))
-    agent.invoke("new task", history=history)
+    await agent.invoke("new task", history=history)
     assert seen[0]["content"] == "previous"  # history preserved
     assert seen[-1]["content"] == "new task"
 
 
-def test_agent_tool_catalog_appears_in_system_prompt():
+async def test_agent_tool_catalog_appears_in_system_prompt():
     from pydantic import BaseModel
 
     class Params(BaseModel):
@@ -132,7 +132,7 @@ def test_agent_tool_catalog_appears_in_system_prompt():
         return "done"
 
     agent = Agent("t", "use tools", FakeClient(capture), tools=(tool,))
-    agent.invoke("go")
+    await agent.invoke("go")
     assert "my_tool" in seen_system[0]
     assert "does a thing" in seen_system[0]
 
@@ -140,18 +140,18 @@ def test_agent_tool_catalog_appears_in_system_prompt():
 # --------------------------------------------------------------------------- #
 # Workers
 # --------------------------------------------------------------------------- #
-def test_make_clarifier_returns_question_set():
+async def test_make_clarifier_returns_question_set():
     qs = QuestionSet(questions=[
         {"key": "vibe", "text": "What vibe?", "choices": ["energetic", "calm"]}
     ])
     client = FakeClient(qs.model_dump_json())
     agent = make_clarifier(client)
-    result = agent.invoke("ask questions", Context().with_(transcript_summary="..."))
+    result = await agent.invoke("ask questions", Context().with_(transcript_summary="..."))
     assert isinstance(result.parsed, QuestionSet)
     assert result.parsed.questions[0].key == "vibe"
 
 
-def test_make_analyst_returns_content_analysis():
+async def test_make_analyst_returns_content_analysis():
     analysis = ContentAnalysis(
         topic="productivity tips",
         arc="hook → problem → tips → CTA",
@@ -161,28 +161,28 @@ def test_make_analyst_returns_content_analysis():
     )
     client = FakeClient(analysis.model_dump_json())
     agent = make_analyst(client)
-    result = agent.invoke("analyse", Context())
+    result = await agent.invoke("analyse", Context())
     assert isinstance(result.parsed, ContentAnalysis)
     assert result.parsed.recommended_look == "punchy"
 
 
-def test_make_planner_returns_skill_plan():
+async def test_make_planner_returns_skill_plan():
     plan = SkillPlan(
         skills=[{"name": "add_captions", "params": {}}, {"name": "punch_in", "params": {"count": 2}}],
         reason="captions + rhythm",
     )
     client = FakeClient(plan.model_dump_json())
     agent = make_planner(client)
-    result = agent.invoke("plan", Context())
+    result = await agent.invoke("plan", Context())
     assert isinstance(result.parsed, SkillPlan)
     assert any(s.name == "add_captions" for s in result.parsed.skills)
 
 
-def test_make_critic_returns_plan_critique():
+async def test_make_critic_returns_plan_critique():
     critique = PlanCritique(approved=True, taste_issues=[], fixes=[])
     client = FakeClient(critique.model_dump_json())
     agent = make_critic(client)
-    result = agent.invoke("critique", Context())
+    result = await agent.invoke("critique", Context())
     assert isinstance(result.parsed, PlanCritique)
     assert result.parsed.approved is True
 
@@ -214,15 +214,15 @@ def _agentic_client(plans_approved: bool = True) -> FakeClient:
     return FakeClient(route)
 
 
-def test_agentic_orchestrator_produces_valid_timeline():
+async def test_agentic_orchestrator_produces_valid_timeline():
     style = load_style_config("bold_creator")
     orc = AgenticOrchestrator(client=_agentic_client())
-    tl = orc.plan_timeline(_transcript(), style, _source(_transcript().duration_ms))
+    tl = await orc.plan_timeline(_transcript(), style, _source(_transcript().duration_ms))
     assert tl.captions
     assert tl.beats  # structural phase always runs
 
 
-def test_agentic_orchestrator_reflection_loop_revises_when_not_approved():
+async def test_agentic_orchestrator_reflection_loop_revises_when_not_approved():
     """When critic rejects, planner is called again for revision."""
     style = load_style_config("bold_creator")
     call_log: list[str] = []
@@ -250,22 +250,22 @@ def test_agentic_orchestrator_reflection_loop_revises_when_not_approved():
         return plan
 
     orc = AgenticOrchestrator(client=FakeClient(route))
-    tl = orc.plan_timeline(_transcript(), style, _source(_transcript().duration_ms))
+    tl = await orc.plan_timeline(_transcript(), style, _source(_transcript().duration_ms))
     assert tl.captions
     assert len(call_log) >= 2  # initial plan + at least one revision
 
 
-def test_agentic_orchestrator_falls_back_on_total_failure():
+async def test_agentic_orchestrator_falls_back_on_total_failure():
     """If the planner returns unparseable JSON the fallback still produces a video."""
     style = load_style_config("bold_creator")
     orc = AgenticOrchestrator(client=FakeClient("not json at all"))
-    tl = orc.plan_timeline(_transcript(), style, _source(_transcript().duration_ms))
+    tl = await orc.plan_timeline(_transcript(), style, _source(_transcript().duration_ms))
     assert tl.captions  # deterministic fallback
 
 
-def test_agentic_orchestrator_writes_error_file_on_failure(tmp_path):
+async def test_agentic_orchestrator_writes_error_file_on_failure(tmp_path):
     style = load_style_config("bold_creator")
     orc = AgenticOrchestrator(client=FakeClient("broken"))
     err = tmp_path / "err.txt"
-    orc.plan_timeline(_transcript(), style, _source(_transcript().duration_ms), error_path=err)
+    await orc.plan_timeline(_transcript(), style, _source(_transcript().duration_ms), error_path=err)
     assert err.is_file()

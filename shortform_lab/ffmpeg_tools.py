@@ -8,11 +8,13 @@ read, rather than producing a broken render much later in the pipeline.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+from .concurrency import ffmpeg_semaphore
 
 
 class FFmpegError(RuntimeError):
@@ -40,20 +42,34 @@ def ensure_ffmpeg_available() -> None:
         )
 
 
-def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    """Run a command, capturing output and raising ``FFmpegError`` on failure."""
-    try:
-        return subprocess.run(cmd, capture_output=True, text=True, check=True)
-    except FileNotFoundError as exc:
-        raise FFmpegError(f"Command not found: {cmd[0]}") from exc
-    except subprocess.CalledProcessError as exc:
-        stderr = (exc.stderr or "").strip()
-        raise FFmpegError(
-            f"Command failed ({' '.join(cmd[:2])} ...): exit {exc.returncode}\n{stderr}"
-        ) from exc
+async def _run(cmd: list[str], *, cwd: Path | None = None) -> str:
+    """Run a command under the ffmpeg concurrency cap, returning its stdout.
+
+    Raises ``FFmpegError`` on failure. Uses ``asyncio.create_subprocess_exec``
+    (never a shell string) so the caller's event loop isn't blocked waiting on
+    an external process, and so several ffmpeg/ffprobe invocations can be in
+    flight at once, bounded by ``ffmpeg_semaphore``.
+    """
+    async with ffmpeg_semaphore:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=str(cwd) if cwd is not None else None,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError as exc:
+            raise FFmpegError(f"Command not found: {cmd[0]}") from exc
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise FFmpegError(
+                f"Command failed ({' '.join(cmd[:2])} ...): exit {proc.returncode}\n"
+                f"{stderr.decode(errors='replace').strip()}"
+            )
+        return stdout.decode(errors="replace")
 
 
-def probe_video(path: Path) -> VideoInfo:
+async def probe_video(path: Path) -> VideoInfo:
     """Probe ``path`` with ffprobe and return its core media facts."""
     if not path.is_file():
         raise FFmpegError(f"Video file not found: {path}")
@@ -66,9 +82,9 @@ def probe_video(path: Path) -> VideoInfo:
         "-show_streams",
         str(path),
     ]
-    result = _run(cmd)
+    stdout = await _run(cmd)
     try:
-        data = json.loads(result.stdout)
+        data = json.loads(stdout)
     except json.JSONDecodeError as exc:
         raise FFmpegError(f"Could not parse ffprobe output for {path}") from exc
 
@@ -101,7 +117,7 @@ def probe_video(path: Path) -> VideoInfo:
     )
 
 
-def extract_audio(video_path: Path, audio_path: Path, *, normalize: bool = False) -> Path:
+async def extract_audio(video_path: Path, audio_path: Path, *, normalize: bool = False) -> Path:
     """Extract a mono 16 kHz WAV from ``video_path`` (good for transcription).
 
     When ``normalize`` is set, loudness is normalized via the ``loudnorm`` filter.
@@ -122,7 +138,7 @@ def extract_audio(video_path: Path, audio_path: Path, *, normalize: bool = False
         cmd += ["-af", "loudnorm"]
     cmd += [str(audio_path)]
 
-    _run(cmd)
+    await _run(cmd)
     if not audio_path.is_file():
         raise FFmpegError(f"Audio extraction produced no file at {audio_path}")
     return audio_path

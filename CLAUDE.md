@@ -203,6 +203,24 @@ Knobs to compose: `--style {bold_creator,clean_captions,word_pop,karaoke,one_wor
   JSON, unknown skill), writing `planner_error.txt`. So a `--use-llm` run with no key
   still produces a video — check `edit_plan.json`'s `reason` (free text = real LLM
   call; the deterministic template = it fell back) and whether `planner_error.txt` exists.
+- **`--translate`** (requires `uv sync --extra openai` + omitting `--transcript`;
+  ignored when `--transcript` is passed) swaps `OpenAITranscriber` for
+  `OpenAITranslator` (`transcribe.py`), which calls OpenAI's Whisper
+  **translations** endpoint (`audio.translations.create`, always English
+  output, `whisper-1` only) instead of the transcriptions endpoint — so
+  non-English speech (e.g. Tamil) renders as English captions. That endpoint
+  doesn't accept `timestamp_granularities`/return word timestamps, only
+  segment-level text + timing, so the resulting `Transcript`'s segments carry
+  no `words`; word-mode caption styles (`word_pop`/`karaoke`/`one_word`/
+  `active_word`) fall back to `build_captions`'s even-spaced timing synthesis
+  rather than real per-word timestamps (sentence-mode styles are unaffected).
+  Verify (needs a real API key and non-English audio — no offline path since
+  it's a live translation call):
+  ```bash
+  uv run python -m shortform_lab.cli process /path/to/tamil_clip.mp4 \
+    --style bold_creator --translate --output-dir /tmp/translate_out
+  cat /tmp/translate_out/transcript.json   # "language": "en", English "text" fields
+  ```
 
 - **Color grading** (`--color cinematic`, a `color.look` in a style, or the LLM's
   `color_grade` skill) maps to FFmpeg `eq`. It lands in `timeline.json` (NOT
@@ -252,6 +270,33 @@ Knobs to compose: `--style {bold_creator,clean_captions,word_pop,karaoke,one_wor
   (adjust the `fontsdir` path — it's relative to the run folder). Eyeballing the
   frame is the real check: `captions.ass`'s `[V4+ Styles]` block should show the
   style's `font_family` (not `FreeSans`) and `Bold=0` on every line.
+- **The engine's I/O boundary (ffmpeg subprocesses, OpenAI calls) is now async**,
+  gated behind two independent `asyncio.Semaphore`s in `concurrency.py`
+  (`ffmpeg_semaphore`/`openai_semaphore` — CPU-bound ffmpeg work and
+  rate-limited API calls have different natural limits, so they're never
+  conflated into one cap). Pure computation (`timeline.py`, `skills/`,
+  `coherence.py`, `presets.py`, `orchestrator.py`'s topo-order/compose) stays
+  synchronous — only real I/O (`ffmpeg_tools.py`, `render.py`'s ffmpeg
+  invocation, `transcribe.py`'s OpenAI calls, `agent.py`'s `OpenAIClient`) is
+  `async def`. `cli.py`'s `process` command is unchanged from the outside — it
+  still runs as one blocking command; internally it wraps the async pipeline
+  in a single `asyncio.run(...)` call. Verify the conversion didn't change
+  behavior by re-running a smoke command and confirming the render is
+  byte-identical with the ffmpeg cap forced down to serialize everything:
+  ```bash
+  uv run python -m shortform_lab.cli process /tmp/smoke.mp4 --style word_pop \
+    --layout letterbox --tighten --transcript tests/fixtures/transcript_sample.json \
+    --output-dir /tmp/async_a
+  SHORTFORM_LAB_FFMPEG_CONCURRENCY=1 uv run python -m shortform_lab.cli process /tmp/smoke.mp4 \
+    --style word_pop --layout letterbox --tighten \
+    --transcript tests/fixtures/transcript_sample.json --output-dir /tmp/async_b
+  cmp /tmp/async_a/final.mp4 /tmp/async_b/final.mp4   # identical either way
+  ```
+  Tune caps via `SHORTFORM_LAB_FFMPEG_CONCURRENCY` (default 4) and
+  `SHORTFORM_LAB_OPENAI_CONCURRENCY` (default 8) — relevant once a future
+  service runs many pipeline jobs concurrently in one worker process; a single
+  CLI run never contends against itself since it only ever has one ffmpeg
+  invocation and one OpenAI call in flight at a time.
 
 Always run `uv run pytest` too — but the smoke test is what catches "renders but
 looks wrong" issues the unit tests can't.

@@ -68,7 +68,7 @@ def test_load_transcript_tolerates_missing_words():
     assert all(seg.words == [] for seg in t.segments)
 
 
-def test_provided_transcriber_returns_file_contents():
+async def test_provided_transcriber_returns_file_contents():
     transcriber = ProvidedTranscriptTranscriber(FIXTURE)
-    t = transcriber.transcribe(Path("ignored.mp4"), work_dir=Path("."))
+    t = await transcriber.transcribe(Path("ignored.mp4"), work_dir=Path("."))
     assert len(t.segments) == 5
